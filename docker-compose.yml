@@ -1,5 +1,8 @@
 services:
 
+  # ------------------------------------------------------------------
+  # FastAPI app — handles Twilio webhooks and admin REST API
+  # ------------------------------------------------------------------
   app:
     build: .
     ports:
@@ -14,8 +17,28 @@ services:
       redis:
         condition: service_healthy
     volumes:
-      - ./app:/app/app   # Hot-reload in development
+      - ./app:/app/app         # Hot-reload in development
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ------------------------------------------------------------------
+  # LiveKit agent worker — connects to LiveKit server and handles calls.
+  # Runs as a separate process from the FastAPI app.
+  # One worker instance can handle multiple concurrent calls.
+  # ------------------------------------------------------------------
+  agent:
+    build: .
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./agent:/app/agent     # Hot-reload in development
+      - ./run_agent.py:/app/run_agent.py
+    command: python run_agent.py dev
+    restart: on-failure
 
   db:
     image: postgres:16-alpine

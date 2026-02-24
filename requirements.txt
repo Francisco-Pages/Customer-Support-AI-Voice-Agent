@@ -8,13 +8,14 @@ pydantic-settings==2.6.1
 # Telephony
 twilio==9.3.7
 
-# AI / LLM / Voice
-openai==1.54.3
-deepgram-sdk==3.7.7
-livekit-agents==0.10.0
-livekit-plugins-openai==0.10.0
-livekit-plugins-deepgram==0.6.15
-livekit-plugins-silero==0.7.3
+# LiveKit Agents 1.x (includes livekit-rtc and livekit-api as dependencies)
+# silero = Silero VAD, turn-detector = end-of-turn detection model
+livekit-agents[silero,turn-detector]~=1.4
+
+# LiveKit AI plugins
+livekit-plugins-openai~=1.4        # GPT-4o LLM + OpenAI TTS
+livekit-plugins-deepgram~=1.4      # Deepgram Nova-2 STT
+livekit-plugins-noise-cancellation~=0.2  # BVC/BVCTelephony noise cancellation
 
 # Vector database
 pinecone-client==5.0.1
