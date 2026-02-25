@@ -3,6 +3,10 @@
 .env.*
 !.env.example
 
+# LiveKit SIP config — contain credentials and trunk IDs
+inbound-trunk.json
+dispatch-rule.json
+
 # Python
 __pycache__/
 *.py[cod]

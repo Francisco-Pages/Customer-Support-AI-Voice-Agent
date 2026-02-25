@@ -91,7 +91,9 @@ async def inbound_call(
 
     # Route to LiveKit using the dialled Twilio number (To) as the SIP identifier.
     # LiveKit's inbound trunk matches on this number.
-    return _twiml_response(_sip_twiml(To))
+    twiml = _sip_twiml(To)
+    logger.info("Returning TwiML:\n%s", twiml)
+    return _twiml_response(twiml)
 
 
 # ---------------------------------------------------------------------------
@@ -154,4 +156,6 @@ async def call_status(
 
     # TODO: await call_service.finalize_call(CallSid, CallStatus, int(CallDuration))
 
-    return Response(status_code=204)
+    # Twilio calls this URL as the <Dial> action when the SIP leg ends.
+    # It expects TwiML back — return an empty <Response> to hang up cleanly.
+    return _twiml_response(VoiceResponse())

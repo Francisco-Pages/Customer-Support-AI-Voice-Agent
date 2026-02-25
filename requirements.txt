@@ -4,6 +4,7 @@ uvicorn[standard]==0.32.1
 
 # Configuration
 pydantic-settings==2.6.1
+python-dotenv==1.2.1
 
 # Telephony
 twilio==9.3.7

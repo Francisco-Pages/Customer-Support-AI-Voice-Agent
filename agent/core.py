@@ -119,8 +119,8 @@ async def hvac_agent(ctx: JobContext) -> None:
     # Build the voice pipeline session
     session = AgentSession(
         stt=deepgram.STT(model="nova-2-phonecall"),   # Optimised for 8kHz phone audio
-        llm=openai.LLM(model="gpt-4o"),
-        tts=openai.TTS(voice="alloy"),
+        llm=openai.LLM(model="gpt-4o-mini"),          # Lower latency than gpt-4o
+        tts=deepgram.TTS(model="aura-2-thalia-en"),   # Much lower latency than OpenAI TTS
         vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
     )
