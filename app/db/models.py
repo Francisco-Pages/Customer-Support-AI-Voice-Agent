@@ -98,6 +98,12 @@ class CustomerProduct(Base):
     # "residential" | "commercial" | "parts"
     product_line: Mapped[str] = mapped_column(String(50), nullable=False)
     serial_number: Mapped[str | None] = mapped_column(String(100))
+    serial_verified: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     purchase_date: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
     )

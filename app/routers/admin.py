@@ -8,13 +8,18 @@ and managing the outbound queue.
 """
 
 import logging
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import verify_admin_api_key
+from app.dependencies import get_db
+from app.services import call as call_service
+from app.services import campaign as campaign_service
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +34,11 @@ router = APIRouter(
 # Request / Response schemas
 # ---------------------------------------------------------------------------
 
+
 class CampaignRequest(BaseModel):
-    customer_ids: list[UUID] = Field(..., min_length=1, description="List of customer UUIDs to target")
+    customer_ids: list[UUID] = Field(..., min_length=1)
     campaign_type: str = Field(..., pattern="^(reminder|followup|warranty_alert)$")
-    scheduled_at: str = Field(..., description="ISO 8601 datetime for when to dispatch calls")
+    scheduled_at: str = Field(..., description="ISO 8601 datetime")
 
 
 class CampaignResponse(BaseModel):
@@ -59,37 +65,101 @@ class CallListResponse(BaseModel):
     calls: list[CallRecord]
 
 
+class QueueEntry(BaseModel):
+    id: UUID
+    customer_id: UUID
+    campaign_type: str
+    scheduled_at: str
+    status: str
+    attempts: int
+    twilio_call_sid: str | None
+
+
+class QueueListResponse(BaseModel):
+    total: int
+    entries: list[QueueEntry]
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _parse_dt(value: str | None, field: str) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid ISO 8601 datetime for '{field}': {value!r}",
+        )
+
+
+def _call_to_record(call) -> CallRecord:
+    return CallRecord(
+        id=call.id,
+        customer_id=call.customer_id,
+        direction=call.direction,
+        twilio_call_sid=call.twilio_call_sid,
+        started_at=call.started_at.isoformat() if call.started_at else None,
+        ended_at=call.ended_at.isoformat() if call.ended_at else None,
+        duration_sec=call.duration_sec,
+        resolution=call.resolution,
+        summary=call.summary,
+        safety_event=call.safety_event,
+    )
+
+
+def _queue_to_entry(entry) -> QueueEntry:
+    return QueueEntry(
+        id=entry.id,
+        customer_id=entry.customer_id,
+        campaign_type=entry.campaign_type,
+        scheduled_at=entry.scheduled_at.isoformat(),
+        status=entry.status,
+        attempts=entry.attempts,
+        twilio_call_sid=entry.twilio_call_sid,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Campaigns
 # ---------------------------------------------------------------------------
 
+
 @router.post("/campaigns", response_model=CampaignResponse, status_code=status.HTTP_201_CREATED)
-async def create_campaign(payload: CampaignRequest):
+async def create_campaign(
+    payload: CampaignRequest,
+    db: AsyncSession = Depends(get_db),
+):
     """
     Enqueue an outbound call campaign for a list of customers.
 
-    - Validates TCPA consent for each customer before inserting into outbound_queue.
-    - Customers without consent are counted in blocked_no_consent and skipped.
-    - Returns a summary of how many calls were queued vs. blocked.
-
-    TODO: Implement DB insert into outbound_queue after consent check.
+    Validates TCPA consent per customer before inserting into outbound_queue.
+    Returns a count of queued vs. blocked (no consent) entries.
     """
+    scheduled_at = _parse_dt(payload.scheduled_at, "scheduled_at")
+
     logger.info(
-        "Campaign enqueue request | type=%s customers=%d scheduled_at=%s",
+        "Campaign enqueue | type=%s customers=%d scheduled_at=%s",
         payload.campaign_type,
         len(payload.customer_ids),
-        payload.scheduled_at,
+        scheduled_at,
     )
 
-    # TODO: For each customer_id:
-    #   1. Fetch customer record from PostgreSQL
-    #   2. If tcpa_consent is False: increment blocked count, skip
-    #   3. If tcpa_consent is True: insert into outbound_queue
-    # queued, blocked = await campaign_service.enqueue(payload)
+    queued, blocked = await campaign_service.enqueue(
+        db,
+        customer_ids=payload.customer_ids,
+        campaign_type=payload.campaign_type,
+        scheduled_at=scheduled_at,
+    )
 
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Campaign service not yet implemented.",
+    return CampaignResponse(
+        queued=queued,
+        blocked_no_consent=blocked,
+        campaign_type=payload.campaign_type,
     )
 
 
@@ -97,83 +167,57 @@ async def create_campaign(payload: CampaignRequest):
 # Call records
 # ---------------------------------------------------------------------------
 
+
 @router.get("/calls", response_model=CallListResponse)
 async def list_calls(
     customer_id: Annotated[UUID | None, Query(description="Filter by customer UUID")] = None,
     resolution: Annotated[str | None, Query(description="Filter by resolution status")] = None,
-    safety_event: Annotated[bool | None, Query(description="Filter to safety-flagged calls only")] = None,
-    date_from: Annotated[str | None, Query(description="ISO 8601 start date filter")] = None,
-    date_to: Annotated[str | None, Query(description="ISO 8601 end date filter")] = None,
+    safety_event: Annotated[bool | None, Query(description="Safety-flagged calls only")] = None,
+    date_from: Annotated[str | None, Query(description="ISO 8601 start date")] = None,
+    date_to: Annotated[str | None, Query(description="ISO 8601 end date")] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
+    db: AsyncSession = Depends(get_db),
 ):
-    """
-    Query call records with optional filters.
-
-    Supports filtering by: customer ID, resolution status, safety event flag,
-    and date range. Returns paginated results ordered by started_at descending.
-
-    TODO: Implement query against calls table in PostgreSQL.
-    """
-    logger.info(
-        "Call record query | customer_id=%s resolution=%s safety=%s",
-        customer_id,
-        resolution,
-        safety_event,
+    """Paginated call records with optional filters, ordered by start time descending."""
+    total, calls = await call_service.list_calls(
+        db,
+        customer_id=customer_id,
+        resolution=resolution,
+        safety_event=safety_event,
+        date_from=_parse_dt(date_from, "date_from"),
+        date_to=_parse_dt(date_to, "date_to"),
+        limit=limit,
+        offset=offset,
     )
-
-    # TODO: Build and execute SQLAlchemy query with applied filters
-    # calls = await call_service.list_calls(
-    #     customer_id=customer_id,
-    #     resolution=resolution,
-    #     safety_event=safety_event,
-    #     date_from=date_from,
-    #     date_to=date_to,
-    #     limit=limit,
-    #     offset=offset,
-    # )
-
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Call record service not yet implemented.",
-    )
+    return CallListResponse(total=total, calls=[_call_to_record(c) for c in calls])
 
 
 @router.get("/calls/{call_id}", response_model=CallRecord)
-async def get_call(call_id: UUID):
-    """
-    Retrieve a single call record by UUID, including full transcript and summary.
-
-    TODO: Implement single call lookup from PostgreSQL.
-    """
-    logger.info("Call detail request | call_id=%s", call_id)
-
-    # TODO: await call_service.get_by_id(call_id)
-
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Call record service not yet implemented.",
-    )
+async def get_call(call_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Retrieve a single call record by UUID."""
+    call = await call_service.get_by_id(db, call_id)
+    if not call:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found.")
+    return _call_to_record(call)
 
 
 # ---------------------------------------------------------------------------
-# Outbound queue management
+# Outbound queue
 # ---------------------------------------------------------------------------
 
-@router.get("/queue")
+
+@router.get("/queue", response_model=QueueListResponse)
 async def list_queue(
     status_filter: Annotated[str | None, Query(alias="status")] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
+    db: AsyncSession = Depends(get_db),
 ):
-    """
-    List records in the outbound_queue.
-
-    Useful for monitoring campaign dispatch progress and identifying blocked records.
-
-    TODO: Implement query against outbound_queue table.
-    """
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Queue service not yet implemented.",
+    """List outbound queue entries with optional status filter."""
+    total, entries = await campaign_service.list_queue(
+        db, status=status_filter, limit=limit, offset=offset
+    )
+    return QueueListResponse(
+        total=total, entries=[_queue_to_entry(e) for e in entries]
     )

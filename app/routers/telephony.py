@@ -18,12 +18,15 @@ SIP Integration overview:
 
 import logging
 
-from fastapi import APIRouter, Form, Request
+from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import Response
+from sqlalchemy.ext.asyncio import AsyncSession
 from twilio.twiml.voice_response import Dial, VoiceResponse
 
 from app.config import settings
 from app.core.security import validate_twilio_signature
+from app.dependencies import get_db
+from app.services import call as call_service
 
 logger = logging.getLogger(__name__)
 
@@ -137,12 +140,13 @@ async def call_status(
     CallSid: str = Form(...),
     CallStatus: str = Form(...),
     CallDuration: str = Form(default="0"),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Twilio posts call lifecycle events here (completed, failed, busy, etc.).
 
-    On completion this handler should persist the final call record.
-    TODO: write final duration and status to the calls table in PostgreSQL.
+    Persists the final duration and resolution for terminal statuses.
+    Non-terminal events (ringing, in-progress) are logged and ignored.
     """
     body = dict(await request.form())
     validate_twilio_signature(request, body)
@@ -154,7 +158,12 @@ async def call_status(
         CallDuration,
     )
 
-    # TODO: await call_service.finalize_call(CallSid, CallStatus, int(CallDuration))
+    await call_service.finalize_call(
+        db,
+        twilio_call_sid=CallSid,
+        twilio_status=CallStatus,
+        duration_sec=int(CallDuration),
+    )
 
     # Twilio calls this URL as the <Dial> action when the SIP leg ends.
     # It expects TwiML back — return an empty <Response> to hang up cleanly.

@@ -65,14 +65,30 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def on_startup():
         logger.info("Starting HVAC Voice AI Agent | debug=%s", settings.debug)
-        # TODO: Verify DB connection
-        # TODO: Verify Redis connection
-        # TODO: Verify Pinecone index exists
+
+        from sqlalchemy import text
+        from app.dependencies import engine
+
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+            logger.info("Database connection OK")
+        except Exception as exc:
+            logger.warning("Database unavailable at startup: %s", exc)
+
+        try:
+            from app.rag.retriever import _redis
+            client = await _redis()
+            await client.ping()
+            logger.info("Redis connection OK")
+        except Exception as exc:
+            logger.warning("Redis unavailable at startup: %s", exc)
 
     @app.on_event("shutdown")
     async def on_shutdown():
         logger.info("Shutting down HVAC Voice AI Agent")
-        # TODO: Gracefully close active LiveKit sessions
+        from app.dependencies import engine
+        await engine.dispose()
 
     return app
 
