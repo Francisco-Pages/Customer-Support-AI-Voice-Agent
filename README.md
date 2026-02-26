@@ -88,6 +88,12 @@ HVAC customers frequently need support for product troubleshooting, warranty inq
 - FR-23: The agent must support queries related to commercial HVAC systems (specifications, service scheduling, parts)
 - FR-24: The agent must support parts & accessories inquiries (availability, compatibility, ordering guidance)
 
+#### 1.6.6 Geo-Search (Technician & Distributor Locator)
+- FR-25: When a caller asks to find a technician, the agent must ask for the caller's city and state, geocode the input to X, Y, Z Cartesian coordinates, and return the 5 nearest technicians via Pinecone vector search
+- FR-26: When a caller asks to find a distributor, the agent must follow the same geocoding and vector search flow and return the 5 nearest distributors
+- FR-27: Geocoding (city + state → latitude/longitude → X/Y/Z unit vector) must be performed server-side before querying Pinecone; the caller is never asked for raw coordinates
+- FR-28: The geo-search Pinecone index must be kept separate from the HVAC knowledge-base index and must use 3-dimensional vectors (one per Cartesian axis)
+
 ### 1.7 Non-Functional Requirements
 
 - NFR-01: Agent response latency must not exceed 1.5 seconds under normal operating conditions
@@ -223,6 +229,8 @@ HVAC customers frequently need support for product troubleshooting, warranty inq
 | `transfer_to_agent` | Trigger Twilio live call transfer to human agent | Twilio API |
 | `schedule_callback` | Book a human agent callback for the customer | PostgreSQL |
 | `send_appointment_sms` | Send SMS appointment confirmation to caller | Twilio Messaging API |
+| `search_technicians` | Find the 5 nearest certified technicians for a given city and state | Pinecone (geo index) |
+| `search_distributors` | Find the 5 nearest authorized distributors for a given city and state | Pinecone (geo index) |
 
 #### 2.2.7 Data Layer
 
@@ -316,7 +324,7 @@ callbacks (
 )
 ```
 
-**Pinecone Index Structure**
+**Pinecone Index Structure — Knowledge Base**
 
 ```
 Index: hvac-knowledge-base
@@ -333,6 +341,43 @@ Metadata schema per vector:
   "source_file":     "string",
   "last_updated":    "string"    -- ISO date
 }
+```
+
+**Pinecone Index Structure — Geo Directory**
+
+```
+Index: hvac-geo-directory
+Dimensions: 3  (X, Y, Z Cartesian unit vector derived from lat/lon)
+Metric: dotproduct  -- maximises for nearest point on the unit sphere
+
+Geocoding pipeline (city + state → vector):
+  1. Resolve city + state to (lat, lon) via geocoding service
+  2. Convert to radians: φ = lat_rad, λ = lon_rad
+  3. Project onto unit sphere:
+       X = cos(φ) · cos(λ)
+       Y = cos(φ) · sin(λ)
+       Z = sin(φ)
+  4. Store [X, Y, Z] as the vector for each record
+
+Metadata schema per vector:
+{
+  "record_type":  "technician" | "distributor",
+  "name":         "string",
+  "address":      "string",
+  "city":         "string",
+  "state":        "string",
+  "phone":        "string",
+  "certifications": ["string"],  -- technicians only, e.g. ["NATE", "EPA-608"]
+  "product_lines": ["string"],   -- e.g. ["residential", "commercial"]
+  "last_updated": "string"       -- ISO date
+}
+
+Query flow for search_technicians / search_distributors:
+  1. Agent asks caller for city and state
+  2. Geocode city+state → (lat, lon) → [X, Y, Z]
+  3. Query hvac-geo-directory with filter { record_type: "technician" | "distributor" }
+     top_k = 5
+  4. Return the 5 nearest records; agent reads name, city, and phone to caller
 ```
 
 ### 2.3 Data Flow: Inbound Call
@@ -493,6 +538,10 @@ Classify intent
     │
     ├── Manage appointment ────────────────────────► update_appointment → confirm → send_appointment_sms
     │
+    ├── Find technician ─────────────────────────────► Ask city + state → search_technicians → read top 5 to caller
+    │
+    ├── Find distributor ────────────────────────────► Ask city + state → search_distributors → read top 5 to caller
+    │
     ├── Billing / Payment ─────────────────────────► Escalate (out of AI scope)
     │
     ├── Emergency ─────────────────────────────────► Hardcoded emergency response (bypasses LLM)
@@ -602,6 +651,7 @@ Inject top-3 chunks into LLM prompt as [CONTEXT]
 | Customer DB lookup (PostgreSQL/RDS) | <50ms |
 | RAG query — Redis cache hit | <20ms |
 | RAG query — Pinecone (cache miss) | 200–400ms |
+| Geo-search — Pinecone (3D dot-product, top_k=5) | 50–150ms |
 | GPT-4o inference | 400–800ms |
 | Tool execution (PostgreSQL) | <100ms |
 | Tool execution (Twilio API) | <500ms |
@@ -818,7 +868,35 @@ When the agent cannot resolve an issue, it always presents the caller with two e
 
 ---
 
-### 4.3 Administrative Stories
+### 4.3 Geo-Search Stories
+
+---
+
+**US-019 — Find a nearby technician**
+> As a customer who needs an in-home repair, I want the agent to find certified HVAC technicians near my city so that I can contact one directly.
+
+**Acceptance Criteria:**
+- Agent asks for city and state before invoking the tool
+- `search_technicians` geocodes city + state to an X/Y/Z unit vector and queries the `hvac-geo-directory` Pinecone index with `record_type = "technician"`
+- Agent reads name, city, and phone number for each of the 5 results
+- If geocoding fails (unrecognized city/state), agent asks the caller to clarify or spell the city name
+- Tool call completes within the 3-second hard timeout; on timeout, agent offers to escalate
+
+---
+
+**US-020 — Find a nearby distributor**
+> As a contractor who needs to purchase parts locally, I want the agent to find authorized HVAC distributors near my location so that I can visit or call one directly.
+
+**Acceptance Criteria:**
+- Agent asks for city and state before invoking the tool
+- `search_distributors` geocodes city + state to an X/Y/Z unit vector and queries the `hvac-geo-directory` Pinecone index with `record_type = "distributor"`
+- Agent reads name, city, and phone number for each of the 5 results
+- If no distributors are indexed within a reasonable radius, agent acknowledges and offers to escalate to the main sales line
+- Tool call completes within the 3-second hard timeout; on timeout, agent offers to escalate
+
+---
+
+### 4.4 Administrative Stories
 
 ---
 

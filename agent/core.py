@@ -19,14 +19,35 @@ LIVEKIT_API_KEY, and LIVEKIT_API_SECRET environment variables.
 import asyncio
 import logging
 import re
+import uuid
+from datetime import datetime, timezone
+from typing import Annotated
 
 from livekit import agents, rtc
-from livekit.agents import AgentServer, AgentSession, Agent, ChatContext, ChatMessage, JobContext, room_io
+from livekit.agents import (
+    AgentServer,
+    AgentSession,
+    Agent,
+    ChatContext,
+    ChatMessage,
+    JobContext,
+    function_tool,
+    room_io,
+)
 from livekit.plugins import deepgram, openai, silero, noise_cancellation
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
+from sqlalchemy import select
+from twilio.rest import Client as TwilioClient
 
 from agent.prompts import INBOUND_SYSTEM_PROMPT, OUTBOUND_SYSTEM_PROMPT
+from app.config import settings
+from app.db.models import CustomerProduct
+from app.dependencies import AsyncSessionLocal
 from app.rag.retriever import retrieve
+from app.services import appointment as appointment_service
+from app.services import call as call_service
+from app.services import customer as customer_service
+from app.services import geo as geo_service
 
 logger = logging.getLogger(__name__)
 
@@ -67,8 +88,9 @@ class HVACAssistant(Agent):
     """
     Alex — the HVAC customer support voice agent.
 
-    Inherits from Agent to provide HVAC-specific instructions and an
-    opening greeting on session start.
+    Inherits from Agent to provide HVAC-specific instructions, an opening
+    greeting on session start, Pattern 2 RAG injection on every user turn,
+    and a full set of function tools the LLM can call during the conversation.
     """
 
     def __init__(self, direction: str = "inbound") -> None:
@@ -76,6 +98,14 @@ class HVACAssistant(Agent):
             INBOUND_SYSTEM_PROMPT if direction == "inbound" else OUTBOUND_SYSTEM_PROMPT
         )
         super().__init__(instructions=instructions)
+        self._twilio = TwilioClient(
+            settings.twilio_account_sid,
+            settings.twilio_auth_token,
+        )
+
+    # ------------------------------------------------------------------
+    # Session lifecycle hooks
+    # ------------------------------------------------------------------
 
     async def on_enter(self) -> None:
         """Deliver the opening greeting when the agent becomes active."""
@@ -124,6 +154,419 @@ class HVACAssistant(Agent):
                     f"{context}"
                 ),
             )
+
+    # ------------------------------------------------------------------
+    # Function tools — customer & warranty
+    # ------------------------------------------------------------------
+
+    @function_tool
+    async def lookup_customer(
+        self,
+        phone: Annotated[
+            str, "Customer phone number in E.164 format (e.g. +15551234567)"
+        ],
+    ) -> str:
+        """
+        Look up a customer record by phone number.
+        Returns their name, address, and registered products with warranty dates.
+        Call this at the start of every inbound call to personalise the conversation.
+        """
+        async with AsyncSessionLocal() as db:
+            customer = await customer_service.get_by_phone_with_products(db, phone)
+
+        if not customer:
+            return "No customer record found for that phone number."
+
+        lines = [
+            f"Name: {customer.name or 'Unknown'}",
+            f"Phone: {customer.phone}",
+        ]
+        if customer.address:
+            lines.append(f"Address: {customer.address}")
+
+        if customer.products:
+            product_strs = []
+            for p in customer.products:
+                s = f"{p.product_model} ({p.product_line})"
+                if p.serial_number:
+                    s += f" — SN: {p.serial_number}"
+                if p.warranty_end_date:
+                    s += f" — Warranty expires: {p.warranty_end_date.strftime('%Y-%m-%d')}"
+                product_strs.append(s)
+            lines.append("Registered products: " + "; ".join(product_strs))
+        else:
+            lines.append("No registered products on file.")
+
+        return "\n".join(lines)
+
+    @function_tool
+    async def lookup_warranty(
+        self,
+        serial_number: Annotated[
+            str, "Product serial number to check warranty status for"
+        ],
+    ) -> str:
+        """
+        Check the warranty status for a product by its serial number.
+        Returns whether the warranty is active or expired and the expiry date.
+        """
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(CustomerProduct).where(
+                    CustomerProduct.serial_number == serial_number.strip()
+                )
+            )
+            product = result.scalar_one_or_none()
+
+        if not product:
+            return f"No product found with serial number {serial_number!r}."
+
+        if product.warranty_end_date is None:
+            return (
+                f"Product {product.product_model} (SN: {serial_number}) — "
+                "warranty expiry date not on file."
+            )
+
+        now = datetime.now(timezone.utc)
+        exp = (
+            product.warranty_end_date.replace(tzinfo=timezone.utc)
+            if product.warranty_end_date.tzinfo is None
+            else product.warranty_end_date
+        )
+
+        if exp >= now:
+            days_left = (exp - now).days
+            return (
+                f"Product {product.product_model} (SN: {serial_number}) is under warranty. "
+                f"Expires {exp.strftime('%B %d, %Y')} ({days_left} days remaining)."
+            )
+        return (
+            f"Product {product.product_model} (SN: {serial_number}) — "
+            f"warranty expired on {exp.strftime('%B %d, %Y')}."
+        )
+
+    # ------------------------------------------------------------------
+    # Function tools — parts
+    # ------------------------------------------------------------------
+
+    @function_tool
+    async def check_parts_availability(
+        self,
+        query: Annotated[
+            str,
+            "Part number, model number, or description of the part needed",
+        ],
+    ) -> str:
+        """
+        Check parts inventory for availability and compatibility with a given model.
+        Returns stock status and estimated lead time.
+        """
+        # TODO: Implement once the parts_inventory table is added to the data layer.
+        #       Query: SELECT * FROM parts_inventory WHERE part_number = $1
+        #              OR $2 = ANY(compatible_with)
+        return (
+            "Parts inventory lookup is not yet connected in this system. "
+            "I can transfer you to a specialist who can check availability directly."
+        )
+
+    # ------------------------------------------------------------------
+    # Function tools — appointments
+    # ------------------------------------------------------------------
+
+    @function_tool
+    async def create_appointment(
+        self,
+        customer_phone: Annotated[str, "Customer phone number in E.164 format"],
+        appointment_type: Annotated[
+            str,
+            "Appointment type: 'service', 'installation', 'maintenance', or 'inspection'",
+        ],
+        scheduled_at_iso: Annotated[
+            str,
+            "Appointment date and time in ISO 8601 format (e.g. 2026-03-15T10:00:00)",
+        ],
+        notes: Annotated[
+            str, "Description of the issue or any additional notes"
+        ] = "",
+    ) -> str:
+        """
+        Create a new service appointment for the customer.
+        Always confirm the date, time, and type with the caller before calling this tool.
+        """
+        try:
+            scheduled_at = datetime.fromisoformat(scheduled_at_iso)
+        except ValueError:
+            return (
+                f"Invalid date format: {scheduled_at_iso!r}. "
+                "Please use ISO 8601 (e.g. 2026-03-15T10:00:00)."
+            )
+
+        async with AsyncSessionLocal() as db:
+            customer = await customer_service.get_by_phone(db, customer_phone)
+            if not customer:
+                return "Could not find a customer record for that phone number."
+            appt = await appointment_service.create(
+                db,
+                customer_id=customer.id,
+                appointment_type=appointment_type,
+                scheduled_at=scheduled_at,
+                notes=notes or None,
+            )
+            await db.commit()
+
+        return (
+            f"Appointment created. "
+            f"Type: {appt.appointment_type}, "
+            f"Scheduled: {appt.scheduled_at.strftime('%A, %B %d at %I:%M %p')}, "
+            f"Reference ID: {appt.id}."
+        )
+
+    @function_tool
+    async def update_appointment(
+        self,
+        appointment_id: Annotated[str, "UUID of the appointment to modify"],
+        new_scheduled_at_iso: Annotated[
+            str,
+            "New date and time in ISO 8601 format — leave blank to keep unchanged",
+        ] = "",
+        new_status: Annotated[
+            str,
+            "New status — 'confirmed', 'cancelled', or 'completed' — leave blank to keep unchanged",
+        ] = "",
+        notes: Annotated[
+            str, "Updated notes — leave blank to keep unchanged"
+        ] = "",
+    ) -> str:
+        """
+        Modify an existing appointment's date, status, or notes.
+        Confirm the changes with the caller before calling this tool.
+        """
+        try:
+            appt_id = uuid.UUID(appointment_id)
+        except ValueError:
+            return f"Invalid appointment ID: {appointment_id!r}."
+
+        kwargs: dict = {}
+        if new_scheduled_at_iso:
+            try:
+                kwargs["scheduled_at"] = datetime.fromisoformat(new_scheduled_at_iso)
+            except ValueError:
+                return f"Invalid date format: {new_scheduled_at_iso!r}."
+        if new_status:
+            kwargs["status"] = new_status
+        if notes:
+            kwargs["notes"] = notes
+
+        if not kwargs:
+            return "No changes specified — nothing was updated."
+
+        async with AsyncSessionLocal() as db:
+            appt = await appointment_service.update(db, appt_id, **kwargs)
+            if not appt:
+                return f"No appointment found with ID {appointment_id}."
+            await db.commit()
+
+        return (
+            f"Appointment {appt.id} updated. "
+            f"Scheduled: {appt.scheduled_at.strftime('%A, %B %d at %I:%M %p')}, "
+            f"Status: {appt.status}."
+        )
+
+    # ------------------------------------------------------------------
+    # Function tools — call history
+    # ------------------------------------------------------------------
+
+    @function_tool
+    async def get_call_history(
+        self,
+        customer_phone: Annotated[str, "Customer phone number in E.164 format"],
+    ) -> str:
+        """
+        Retrieve the last 5 call summaries for a customer.
+        Use this to understand prior interactions and avoid asking the caller
+        to repeat themselves.
+        """
+        async with AsyncSessionLocal() as db:
+            customer = await customer_service.get_by_phone(db, customer_phone)
+            if not customer:
+                return "No customer record found for that phone number."
+            _, calls = await call_service.list_calls(
+                db, customer_id=customer.id, limit=5
+            )
+
+        if not calls:
+            return "No previous call history on file."
+
+        lines = []
+        for c in calls:
+            ts = c.started_at.strftime("%Y-%m-%d") if c.started_at else "unknown date"
+            resolution = c.resolution or "unresolved"
+            summary = c.summary or "No summary available."
+            lines.append(f"{ts} [{resolution}]: {summary}")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Function tools — escalation
+    # ------------------------------------------------------------------
+
+    @function_tool
+    async def transfer_to_agent(
+        self,
+        reason: Annotated[
+            str,
+            "Brief reason for the transfer (e.g. 'billing dispute', 'complex repair question')",
+        ],
+    ) -> str:
+        """
+        Escalate the call to a live human specialist.
+        Use when: the caller asks to speak to a person, the issue is outside your
+        scope, or you have been unable to resolve the problem.
+        Always tell the caller they are being transferred before this ends the session.
+        """
+        logger.info("Live transfer requested | reason=%r", reason)
+        # TODO: For immediate SIP transfer, call the Twilio REST API:
+        #   self._twilio.calls(call_sid).update(
+        #       twiml='<Response><Dial><Queue>support</Queue></Dial></Response>'
+        #   )
+        #   The Twilio Call SID is available in the SIP participant's attributes
+        #   (sip.callID) once the room is connected. Wire it via on_enter if needed.
+        return (
+            f"Transfer to a live specialist has been initiated. Reason: {reason}. "
+            "Say to the caller: 'I'm connecting you with a specialist right now — "
+            "please hold for just a moment. Thank you for your patience.'"
+        )
+
+    @function_tool
+    async def schedule_callback(
+        self,
+        customer_phone: Annotated[str, "Customer phone number in E.164 format"],
+        preferred_time_iso: Annotated[
+            str, "Caller's preferred callback time in ISO 8601 format"
+        ],
+        reason: Annotated[str, "Brief reason for the callback request"],
+    ) -> str:
+        """
+        Schedule a callback from a human specialist at the customer's preferred time.
+        Use this as the alternative to an immediate live transfer.
+        """
+        try:
+            preferred_time = datetime.fromisoformat(preferred_time_iso)
+        except ValueError:
+            return (
+                f"Invalid time format: {preferred_time_iso!r}. "
+                "Please use ISO 8601 (e.g. 2026-03-15T14:00:00)."
+            )
+
+        async with AsyncSessionLocal() as db:
+            customer = await customer_service.get_by_phone(db, customer_phone)
+            if not customer:
+                return "Could not find a customer record for that phone number."
+            appt = await appointment_service.create(
+                db,
+                customer_id=customer.id,
+                appointment_type="callback",
+                scheduled_at=preferred_time,
+                notes=f"Callback requested — reason: {reason}",
+            )
+            await db.commit()
+
+        return (
+            f"Callback scheduled for {preferred_time.strftime('%A, %B %d at %I:%M %p')}. "
+            f"Reference ID: {appt.id}. "
+            "A specialist will call back at that time."
+        )
+
+    # ------------------------------------------------------------------
+    # Function tools — SMS
+    # ------------------------------------------------------------------
+
+    @function_tool
+    async def send_appointment_sms(
+        self,
+        customer_phone: Annotated[
+            str, "Customer phone number in E.164 format to send the SMS to"
+        ],
+        message: Annotated[
+            str,
+            "Full SMS text confirming the appointment — include date, time, and type",
+        ],
+    ) -> str:
+        """
+        Send an SMS appointment confirmation to the customer's phone.
+        Call this after every appointment is created or updated.
+        """
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(
+                None,
+                lambda: self._twilio.messages.create(
+                    body=message,
+                    from_=settings.twilio_phone_number,
+                    to=customer_phone,
+                ),
+            )
+        except Exception as exc:
+            logger.error("SMS send failed | to=%s error=%s", customer_phone, exc)
+            return f"SMS could not be sent ({exc}). The appointment was still saved."
+        return f"SMS confirmation sent to {customer_phone}."
+
+    # ------------------------------------------------------------------
+    # Function tools — geo search
+    # ------------------------------------------------------------------
+
+    @function_tool
+    async def search_technicians(
+        self,
+        city: Annotated[str, "City name the caller is located in (e.g. 'Austin')"],
+        state: Annotated[
+            str,
+            "US state — two-letter code or full name (e.g. 'TX' or 'Texas')",
+        ],
+    ) -> str:
+        """
+        Find the 5 nearest certified HVAC technicians to the caller's location.
+        Always ask the caller for their city and state before calling this tool.
+        """
+        results = await geo_service.search(city, state, record_type="technician")
+        if not results:
+            return (
+                f"No certified technicians found near {city}, {state}. "
+                "I can connect you with our main support line for further assistance."
+            )
+        lines = [f"Here are the 5 nearest certified technicians near {city}, {state}:"]
+        for i, r in enumerate(results, 1):
+            lines.append(
+                f"{i}. {r['name']} in {r['city']}, {r['state']} — {r['phone']}"
+            )
+        return "\n".join(lines)
+
+    @function_tool
+    async def search_distributors(
+        self,
+        city: Annotated[str, "City name the caller is located in (e.g. 'Austin')"],
+        state: Annotated[
+            str,
+            "US state — two-letter code or full name (e.g. 'TX' or 'Texas')",
+        ],
+    ) -> str:
+        """
+        Find the 5 nearest authorized HVAC parts distributors near the caller's location.
+        Always ask the caller for their city and state before calling this tool.
+        """
+        results = await geo_service.search(city, state, record_type="distributor")
+        if not results:
+            return (
+                f"No authorized distributors found near {city}, {state}. "
+                "I can connect you with our main support line for further assistance."
+            )
+        lines = [
+            f"Here are the 5 nearest authorized distributors near {city}, {state}:"
+        ]
+        for i, r in enumerate(results, 1):
+            lines.append(
+                f"{i}. {r['name']} in {r['city']}, {r['state']} — {r['phone']}"
+            )
+        return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

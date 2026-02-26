@@ -5,6 +5,7 @@ Customer service — CRUD operations on the customers table.
 import uuid
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Customer
@@ -12,6 +13,16 @@ from app.db.models import Customer
 
 async def get_by_phone(db: AsyncSession, phone: str) -> Customer | None:
     result = await db.execute(select(Customer).where(Customer.phone == phone))
+    return result.scalar_one_or_none()
+
+
+async def get_by_phone_with_products(db: AsyncSession, phone: str) -> Customer | None:
+    """Load the customer and their registered products in a single query."""
+    result = await db.execute(
+        select(Customer)
+        .where(Customer.phone == phone)
+        .options(selectinload(Customer.products))
+    )
     return result.scalar_one_or_none()
 
 
