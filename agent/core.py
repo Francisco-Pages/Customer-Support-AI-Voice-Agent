@@ -21,11 +21,12 @@ import logging
 import re
 
 from livekit import agents, rtc
-from livekit.agents import AgentServer, AgentSession, Agent, JobContext, room_io
+from livekit.agents import AgentServer, AgentSession, Agent, ChatContext, ChatMessage, JobContext, room_io
 from livekit.plugins import deepgram, openai, silero, noise_cancellation
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 from agent.prompts import INBOUND_SYSTEM_PROMPT, OUTBOUND_SYSTEM_PROMPT
+from app.rag.retriever import retrieve
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,43 @@ class HVACAssistant(Agent):
                 "Keep the greeting to one or two sentences."
             )
         )
+
+    async def on_user_turn_completed(
+        self, turn_ctx: ChatContext, new_message: ChatMessage
+    ) -> None:
+        """
+        Pattern 2 RAG injection — runs after the user's turn ends, before
+        the LLM generates its response.
+
+        Steps:
+          1. Use the user's raw STT transcript as the Pinecone query.
+          2. Embed + query Pinecone (Redis-cached for 1 hour).
+          3. If relevant passages exist, inject them into turn_ctx as an
+             assistant message so the LLM has grounded context for its answer.
+
+        Injected messages are scoped to this turn only and are not persisted
+        to the chat history, keeping the context window lean.
+        """
+        query = new_message.text_content
+        if not query:
+            return
+
+        try:
+            context = await retrieve(query=query)
+        except Exception:
+            logger.warning("RAG retrieval failed — continuing without context", exc_info=True)
+            return
+
+        if context:
+            turn_ctx.add_message(
+                role="assistant",
+                content=(
+                    "The following information from the HVAC knowledge base is relevant "
+                    "to the customer's question. Use it to inform your answer, but speak "
+                    "naturally — do not read it verbatim:\n\n"
+                    f"{context}"
+                ),
+            )
 
 
 # ---------------------------------------------------------------------------
