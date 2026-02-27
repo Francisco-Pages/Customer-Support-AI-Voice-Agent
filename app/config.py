@@ -39,8 +39,8 @@ class Settings(BaseSettings):
 
     # Pinecone
     pinecone_api_key: str
-    pinecone_index_name: str       # HVAC knowledge-base index (1536-dim, cosine)
-    pinecone_geo_index_name: str = "hvac-geo-directory"   # Geo-directory index (3-dim, dotproduct)
+    pinecone_index_name: str = "ai-agent"      # HVAC knowledge-base index (1536-dim, cosine)
+    pinecone_geo_index_name: str = "locations" # Geo-directory index (3-dim, dotproduct)
 
     # PostgreSQL (AWS RDS)
     database_url: str  # e.g. postgresql+asyncpg://user:password@host:5432/dbname

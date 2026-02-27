@@ -327,7 +327,7 @@ callbacks (
 **Pinecone Index Structure — Knowledge Base**
 
 ```
-Index: hvac-knowledge-base
+Index: ai-agent
 Dimensions: 1536 (OpenAI text-embedding-3-small)
 Metric: cosine
 
@@ -346,7 +346,7 @@ Metadata schema per vector:
 **Pinecone Index Structure — Geo Directory**
 
 ```
-Index: hvac-geo-directory
+Index: locations
 Dimensions: 3  (X, Y, Z Cartesian unit vector derived from lat/lon)
 Metric: dotproduct  -- maximises for nearest point on the unit sphere
 
@@ -375,7 +375,7 @@ Metadata schema per vector:
 Query flow for search_technicians / search_distributors:
   1. Agent asks caller for city and state
   2. Geocode city+state → (lat, lon) → [X, Y, Z]
-  3. Query hvac-geo-directory with filter { record_type: "technician" | "distributor" }
+  3. Query locations with filter { record_type: "technician" | "distributor" }
      top_k = 5
   4. Return the 5 nearest records; agent reads name, city, and phone to caller
 ```
@@ -877,7 +877,7 @@ When the agent cannot resolve an issue, it always presents the caller with two e
 
 **Acceptance Criteria:**
 - Agent asks for city and state before invoking the tool
-- `search_technicians` geocodes city + state to an X/Y/Z unit vector and queries the `hvac-geo-directory` Pinecone index with `record_type = "technician"`
+- `search_technicians` geocodes city + state to an X/Y/Z unit vector and queries the `locations` Pinecone index with `record_type = "technician"`
 - Agent reads name, city, and phone number for each of the 5 results
 - If geocoding fails (unrecognized city/state), agent asks the caller to clarify or spell the city name
 - Tool call completes within the 3-second hard timeout; on timeout, agent offers to escalate
@@ -889,7 +889,7 @@ When the agent cannot resolve an issue, it always presents the caller with two e
 
 **Acceptance Criteria:**
 - Agent asks for city and state before invoking the tool
-- `search_distributors` geocodes city + state to an X/Y/Z unit vector and queries the `hvac-geo-directory` Pinecone index with `record_type = "distributor"`
+- `search_distributors` geocodes city + state to an X/Y/Z unit vector and queries the `locations` Pinecone index with `record_type = "distributor"`
 - Agent reads name, city, and phone number for each of the 5 results
 - If no distributors are indexed within a reasonable radius, agent acknowledges and offers to escalate to the main sales line
 - Tool call completes within the 3-second hard timeout; on timeout, agent offers to escalate
