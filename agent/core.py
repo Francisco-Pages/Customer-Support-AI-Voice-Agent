@@ -17,11 +17,14 @@ LIVEKIT_API_KEY, and LIVEKIT_API_SECRET environment variables.
 """
 
 import asyncio
+import contextlib
 import logging
 import re
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated
+
+import redis.asyncio as aioredis
 
 from livekit import agents, rtc
 from livekit.agents import (
@@ -93,7 +96,7 @@ class HVACAssistant(Agent):
     and a full set of function tools the LLM can call during the conversation.
     """
 
-    def __init__(self, direction: str = "inbound") -> None:
+    def __init__(self, direction: str = "inbound", caller_phone: str | None = None) -> None:
         instructions = (
             INBOUND_SYSTEM_PROMPT if direction == "inbound" else OUTBOUND_SYSTEM_PROMPT
         )
@@ -102,13 +105,29 @@ class HVACAssistant(Agent):
             settings.twilio_account_sid,
             settings.twilio_auth_token,
         )
+        self._caller_phone: str | None = caller_phone
+        self._sms_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------
     # Session lifecycle hooks
     # ------------------------------------------------------------------
 
     async def on_enter(self) -> None:
-        """Deliver the opening greeting when the agent becomes active."""
+        """Deliver the opening greeting and start the SMS side-channel watcher."""
+        # Only start the SMS watcher once — on_enter() can be called multiple times
+        # by the framework (e.g. after reconnection), and each call would create a
+        # new subscription that would receive every subsequent SMS.
+        if self._caller_phone and not (self._sms_task and not self._sms_task.done()):
+            try:
+                redis = await aioredis.from_url(settings.redis_url, decode_responses=True)
+                await redis.set(f"active_call:{self._caller_phone}", "1", ex=7200)
+                await redis.aclose()
+                self._sms_task = asyncio.create_task(
+                    self._watch_sms(self._caller_phone)
+                )
+            except Exception:
+                logger.warning("Redis unavailable — SMS side-channel disabled", exc_info=True)
+
         await self.session.generate_reply(
             instructions=(
                 "Greet the caller warmly and professionally. "
@@ -117,6 +136,21 @@ class HVACAssistant(Agent):
                 "Keep the greeting to one or two sentences."
             )
         )
+
+    async def on_exit(self) -> None:
+        """Cancel the SMS watcher and remove the active_call key when the call ends."""
+        if self._sms_task:
+            self._sms_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._sms_task
+
+        if self._caller_phone:
+            try:
+                redis = await aioredis.from_url(settings.redis_url, decode_responses=True)
+                await redis.delete(f"active_call:{self._caller_phone}")
+                await redis.aclose()
+            except Exception:
+                logger.warning("Could not remove active_call key from Redis", exc_info=True)
 
     async def on_user_turn_completed(
         self, turn_ctx: ChatContext, new_message: ChatMessage
@@ -510,6 +544,37 @@ class HVACAssistant(Agent):
             return f"SMS could not be sent ({exc}). The appointment was still saved."
         return f"SMS confirmation sent to {customer_phone}."
 
+    @function_tool
+    async def reply_via_sms(
+        self,
+        message: Annotated[
+            str,
+            "The text to send back to the customer. Plain text only, no markdown.",
+        ],
+    ) -> str:
+        """
+        Send an SMS reply to the caller's phone number.
+        Always call this when answering a question that arrived via text message,
+        so the customer receives both a spoken answer and a written copy.
+        """
+        if not self._caller_phone:
+            return "Cannot send SMS reply — caller phone number not available for this session."
+
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(
+                None,
+                lambda: self._twilio.messages.create(
+                    body=message,
+                    from_=settings.twilio_phone_number,
+                    to=self._caller_phone,
+                ),
+            )
+        except Exception as exc:
+            logger.error("SMS reply failed | to=%s error=%s", self._caller_phone, exc)
+            return f"SMS reply could not be sent ({exc})."
+        return f"SMS reply sent to {self._caller_phone}."
+
     # ------------------------------------------------------------------
     # Function tools — geo search
     # ------------------------------------------------------------------
@@ -568,6 +633,94 @@ class HVACAssistant(Agent):
             )
         return "\n".join(lines)
 
+    # ------------------------------------------------------------------
+    # SMS side-channel watcher (private)
+    # ------------------------------------------------------------------
+
+    async def _watch_sms(self, phone: str) -> None:
+        """
+        Subscribe to the sms_inbound:{phone} Redis pub/sub channel for the
+        duration of the call and relay each incoming SMS into the session.
+
+        Pub/sub requires a dedicated connection — a separate client is created
+        here and closed when the task is cancelled via on_exit().
+
+        On each message the agent is instructed to:
+          1. Answer verbally (the normal voice response).
+          2. Call reply_via_sms so the customer also gets a written copy.
+        """
+        redis = await aioredis.from_url(settings.redis_url, decode_responses=True)
+        pubsub = redis.pubsub()
+        await pubsub.subscribe(f"sms_inbound:{phone}")
+        logger.info("SMS watcher active | channel=sms_inbound:%s", phone)
+        try:
+            async for message in pubsub.listen():
+                if message["type"] != "message":
+                    continue
+                sms_body: str = message["data"]
+                logger.info("SMS received during call | from=%s body=%r", phone, sms_body)
+
+                # RAG — same pattern as on_user_turn_completed but triggered
+                # manually because generate_reply() bypasses that hook entirely.
+                chat_ctx = self.session.history.copy()
+                try:
+                    rag_context = await retrieve(query=sms_body)
+                    if rag_context:
+                        chat_ctx.add_message(
+                            role="assistant",
+                            content=(
+                                "The following information from the HVAC knowledge base "
+                                "is relevant to the customer's question. Use it to inform "
+                                "your answer, but speak naturally — do not read it verbatim:"
+                                f"\n\n{rag_context}"
+                            ),
+                        )
+                except Exception:
+                    logger.warning("RAG retrieval failed for SMS", exc_info=True)
+
+                # Pass as user_input so the framework adds it to the persistent
+                # chat history via its normal scheduling path.
+                await self.session.generate_reply(
+                    user_input=f"[Customer sent via SMS]: {sms_body}",
+                    chat_ctx=chat_ctx,
+                    instructions=(
+                        "This message arrived via SMS during the call. "
+                        "Acknowledge it verbally and answer any question in it."
+                    ),
+                )
+
+                # After playout, grab the agent's response from history and send
+                # it as an SMS reply. We do this in code rather than asking the
+                # LLM to call a tool — tool compliance is unreliable for this.
+                try:
+                    last_reply = next(
+                        (m for m in reversed(self.session.history.messages()) if m.role == "assistant"),
+                        None,
+                    )
+                    reply_text = last_reply.text_content if last_reply else None
+                    logger.info("SMS reply | last_reply=%s text=%r", last_reply is not None, reply_text and reply_text[:80])
+                    if reply_text:
+                        loop = asyncio.get_event_loop()
+                        await loop.run_in_executor(
+                            None,
+                            lambda: self._twilio.messages.create(
+                                body=reply_text[:1600],
+                                from_=settings.twilio_phone_number,
+                                to=phone,
+                            ),
+                        )
+                        logger.info("SMS reply sent | to=%s", phone)
+                    else:
+                        logger.warning("SMS reply skipped — no assistant text in history")
+                except Exception as exc:
+                    logger.error("SMS reply failed | to=%s error=%r", phone, exc)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await pubsub.unsubscribe(f"sms_inbound:{phone}")
+            await redis.aclose()
+            logger.info("SMS watcher stopped | channel=sms_inbound:%s", phone)
+
 
 # ---------------------------------------------------------------------------
 # Agent server & session entrypoint
@@ -596,6 +749,15 @@ async def hvac_agent(ctx: JobContext) -> None:
             direction = meta.get("direction", "inbound")
         except (json.JSONDecodeError, AttributeError):
             pass
+
+    # Extract the caller's phone number from the room name.
+    # LiveKit names SIP rooms: call-_{caller_e164}_{random}, e.g.
+    #   call-_+19548025709_5kfzCTKWkP7W
+    # This is available immediately — no need to wait for the SIP participant.
+    _room_phone_re = re.compile(r"call-_(\+\d+)_")
+    _m = _room_phone_re.search(ctx.room.name)
+    caller_phone: str | None = _m.group(1) if _m else None
+    logger.info("Caller phone | phone=%s room=%s", caller_phone, ctx.room.name)
 
     # Build the voice pipeline session
     session = AgentSession(
@@ -640,7 +802,7 @@ async def hvac_agent(ctx: JobContext) -> None:
 
     await session.start(
         room=ctx.room,
-        agent=HVACAssistant(direction=direction),
+        agent=HVACAssistant(direction=direction, caller_phone=caller_phone),
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
                 noise_cancellation=lambda params: (

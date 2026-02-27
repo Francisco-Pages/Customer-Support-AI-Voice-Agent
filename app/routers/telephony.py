@@ -25,7 +25,7 @@ from twilio.twiml.voice_response import Dial, VoiceResponse
 
 from app.config import settings
 from app.core.security import validate_twilio_signature
-from app.dependencies import get_db
+from app.dependencies import get_db, get_redis
 from app.services import call as call_service
 
 logger = logging.getLogger(__name__)
@@ -168,3 +168,44 @@ async def call_status(
     # Twilio calls this URL as the <Dial> action when the SIP leg ends.
     # It expects TwiML back — return an empty <Response> to hang up cleanly.
     return _twiml_response(VoiceResponse())
+
+
+# ---------------------------------------------------------------------------
+# Inbound SMS webhook
+# ---------------------------------------------------------------------------
+
+
+@router.post("/sms")
+async def inbound_sms(
+    request: Request,
+    From: str = Form(...),
+    Body: str = Form(...),
+):
+    """
+    Twilio posts incoming SMS messages here when a text is sent to our number.
+
+    If the sender currently has an active voice call (tracked via the
+    active_call:{phone} Redis key set by the agent on call start), the
+    message body is published to the sms_inbound:{phone} pub/sub channel
+    so the agent can answer verbally and reply by text.
+
+    SMS from numbers with no active call are silently dropped — this
+    endpoint is intentionally a side-channel for callers already on the line.
+    """
+    form = dict(await request.form())
+    validate_twilio_signature(request, form)
+
+    logger.info("Inbound SMS | from=%s body=%r", From, Body[:80])
+
+    try:
+        redis = await get_redis()
+        if await redis.exists(f"active_call:{From}"):
+            await redis.publish(f"sms_inbound:{From}", Body)
+            logger.info("SMS relayed to active session | from=%s", From)
+        else:
+            logger.info("SMS from %s ignored — no active call", From)
+    except Exception:
+        logger.warning("Redis error handling inbound SMS", exc_info=True)
+
+    # Twilio requires a response even for SMS webhooks.
+    return Response(content="<Response/>", media_type="application/xml")
