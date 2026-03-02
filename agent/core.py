@@ -37,6 +37,7 @@ from livekit.agents import (
     function_tool,
     room_io,
 )
+from openai import AsyncOpenAI
 from livekit.plugins import deepgram, openai, silero, noise_cancellation
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from sqlalchemy import select
@@ -96,7 +97,12 @@ class HVACAssistant(Agent):
     and a full set of function tools the LLM can call during the conversation.
     """
 
-    def __init__(self, direction: str = "inbound", caller_phone: str | None = None) -> None:
+    def __init__(
+        self,
+        direction: str = "inbound",
+        caller_phone: str | None = None,
+        room_name: str | None = None,
+    ) -> None:
         instructions = (
             INBOUND_SYSTEM_PROMPT if direction == "inbound" else OUTBOUND_SYSTEM_PROMPT
         )
@@ -106,6 +112,8 @@ class HVACAssistant(Agent):
             settings.twilio_auth_token,
         )
         self._caller_phone: str | None = caller_phone
+        self._room_name: str | None = room_name
+        self._twilio_call_sid: str | None = None
         self._sms_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------
@@ -121,6 +129,9 @@ class HVACAssistant(Agent):
             try:
                 redis = await aioredis.from_url(settings.redis_url, decode_responses=True)
                 await redis.set(f"active_call:{self._caller_phone}", "1", ex=7200)
+                # Retrieve the Twilio Call SID stored by the /inbound webhook so
+                # we can link the post-call transcript back to the DB record.
+                self._twilio_call_sid = await redis.get(f"call_sid:{self._caller_phone}")
                 await redis.aclose()
                 self._sms_task = asyncio.create_task(
                     self._watch_sms(self._caller_phone)
@@ -138,7 +149,7 @@ class HVACAssistant(Agent):
         )
 
     async def on_exit(self) -> None:
-        """Cancel the SMS watcher and remove the active_call key when the call ends."""
+        """Cancel the SMS watcher, remove the active_call key, and save post-call data."""
         if self._sms_task:
             self._sms_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -151,6 +162,88 @@ class HVACAssistant(Agent):
                 await redis.aclose()
             except Exception:
                 logger.warning("Could not remove active_call key from Redis", exc_info=True)
+
+        await self._save_post_call_data()
+
+    async def _save_post_call_data(self) -> None:
+        """Build transcript, generate summary, and write both to the calls table."""
+        if not self._twilio_call_sid:
+            logger.warning(
+                "No Twilio Call SID available — post-call data not saved | phone=%s",
+                self._caller_phone,
+            )
+            return
+
+        try:
+            transcript = self._build_transcript()
+            summary = ""
+            if transcript:
+                try:
+                    summary = await self._generate_summary(transcript)
+                except Exception:
+                    logger.warning("Summary generation failed", exc_info=True)
+
+            async with AsyncSessionLocal() as db:
+                await call_service.save_post_call_data(
+                    db,
+                    twilio_call_sid=self._twilio_call_sid,
+                    transcript=transcript,
+                    summary=summary,
+                    livekit_room=self._room_name,
+                )
+                await db.commit()
+
+            logger.info(
+                "Post-call data saved | sid=%s transcript_chars=%d summary_chars=%d",
+                self._twilio_call_sid,
+                len(transcript),
+                len(summary),
+            )
+        except Exception:
+            logger.error("Failed to save post-call data", exc_info=True)
+
+    def _build_transcript(self) -> str:
+        """
+        Reconstruct a readable transcript from the session chat history.
+        Only includes user and assistant turns; skips system messages and
+        RAG context injections.
+        """
+        lines = []
+        for msg in self.session.history.messages():
+            if msg.role == "user":
+                text = msg.text_content
+                if text:
+                    lines.append(f"Customer: {text}")
+            elif msg.role == "assistant":
+                text = msg.text_content
+                if text:
+                    lines.append(f"Alex: {text}")
+        return "\n".join(lines)
+
+    async def _generate_summary(self, transcript: str) -> str:
+        """
+        Call GPT-4o-mini to produce a 2-3 sentence summary of the call.
+        Covers: customer's issue, what was resolved, and any next steps.
+        """
+        client = AsyncOpenAI(api_key=settings.openai_api_key)
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You summarize HVAC customer support call transcripts concisely "
+                        "in 2-3 sentences. Cover: the customer's main issue, what was "
+                        "resolved or offered, and any next steps such as appointments, "
+                        "callbacks, parts orders, or escalations. Be specific and factual."
+                    ),
+                },
+                {"role": "user", "content": transcript},
+            ],
+            max_tokens=200,
+            temperature=0,
+        )
+        return response.choices[0].message.content or ""
 
     async def on_user_turn_completed(
         self, turn_ctx: ChatContext, new_message: ChatMessage
@@ -802,7 +895,7 @@ async def hvac_agent(ctx: JobContext) -> None:
 
     await session.start(
         room=ctx.room,
-        agent=HVACAssistant(direction=direction, caller_phone=caller_phone),
+        agent=HVACAssistant(direction=direction, caller_phone=caller_phone, room_name=ctx.room.name),
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
                 noise_cancellation=lambda params: (

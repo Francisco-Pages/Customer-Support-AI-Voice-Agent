@@ -2,6 +2,7 @@
 Call service — create and finalize records in the calls table.
 """
 
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -9,6 +10,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Call
+
+logger = logging.getLogger(__name__)
 
 # Twilio statuses that mean the call is permanently finished
 _TERMINAL_STATUSES = {"completed", "failed", "busy", "no-answer", "canceled"}
@@ -75,6 +78,33 @@ async def finalize_call(
 
     if call.resolution is None:
         call.resolution = "resolved" if twilio_status == "completed" else "abandoned"
+
+    await db.flush()
+    return call
+
+
+async def save_post_call_data(
+    db: AsyncSession,
+    twilio_call_sid: str,
+    transcript: str,
+    summary: str,
+    livekit_room: str | None = None,
+) -> Call | None:
+    """
+    Persist the full conversation transcript and GPT-generated summary
+    after a call ends. Called from the agent's on_exit() hook.
+
+    Also backfills livekit_room if it was not set at call creation time.
+    """
+    call = await get_by_sid(db, twilio_call_sid)
+    if not call:
+        logger.warning("save_post_call_data: no call record for SID %s", twilio_call_sid)
+        return None
+
+    call.transcript = transcript
+    call.summary = summary
+    if livekit_room and call.livekit_room is None:
+        call.livekit_room = livekit_room
 
     await db.flush()
     return call

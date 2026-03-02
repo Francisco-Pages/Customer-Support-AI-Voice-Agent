@@ -18,49 +18,38 @@ import logging
 import math
 from functools import lru_cache
 
-import httpx
+from geopy.geocoders import Nominatim
+from geopy.adapters import AioHTTPAdapter
 from pinecone import Pinecone
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-_NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
-# Nominatim's usage policy requires a descriptive User-Agent.
-_USER_AGENT = "HVACVoiceAgent/1.0 (voice customer support; contact: ops@example.com)"
-
 
 async def geocode_city_state(city: str, state: str) -> tuple[float, float] | None:
     """
-    Resolve a US city + state to (latitude, longitude) using the Nominatim API.
+    Resolve a US city + state to (latitude, longitude) using geopy's async
+    Nominatim adapter. Free, no API key required.
+
     Returns None on network error or if the location is not found.
     """
-    async with httpx.AsyncClient(headers={"User-Agent": _USER_AGENT}) as client:
-        try:
-            resp = await client.get(
-                _NOMINATIM_URL,
-                params={
-                    "city": city,
-                    "state": state,
-                    "country": "US",
-                    "format": "json",
-                    "limit": 1,
-                },
-                timeout=5.0,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception:
-            logger.warning(
-                "Nominatim geocoding failed for %r, %r", city, state, exc_info=True
-            )
-            return None
+    try:
+        async with Nominatim(
+            user_agent="HVACVoiceAgent/1.0", adapter_factory=AioHTTPAdapter
+        ) as geolocator:
+            location = await geolocator.geocode(f"{city}, {state}, USA")
+    except Exception:
+        logger.warning(
+            "Geocoding failed for %r, %r", city, state, exc_info=True
+        )
+        return None
 
-    if not data:
+    if not location:
         logger.info("No geocoding result for %r, %r", city, state)
         return None
 
-    return float(data[0]["lat"]), float(data[0]["lon"])
+    return location.latitude, location.longitude
 
 
 def _latlon_to_xyz(lat: float, lon: float) -> list[float]:
@@ -82,23 +71,36 @@ def _geo_index():
 
 def _sync_query(vector: list[float], record_type: str, top_k: int) -> list[dict]:
     """Run synchronously inside a thread executor."""
+    # Vectors are stored in named namespaces ("technicians" / "distributors").
+    # Metadata field names differ per record type:
+    #   technicians:  technician_name, phone_number, address
+    #   distributors: distributor_name, phone_number, address
+    # The address field contains "Street, City, State" — city and state are
+    # parsed from the last two comma-separated parts.
+    namespace = "technicians" if record_type == "technician" else "distributors"
+    name_field = "technician_name" if record_type == "technician" else "distributor_name"
     index = _geo_index()
     results = index.query(
         vector=vector,
         top_k=top_k,
-        filter={"record_type": {"$eq": record_type}},
+        namespace=namespace,
         include_metadata=True,
     )
-    return [
-        {
-            "name": m.metadata.get("name", "Unknown"),
-            "city": m.metadata.get("city", ""),
-            "state": m.metadata.get("state", ""),
-            "phone": m.metadata.get("phone", "N/A"),
-            "address": m.metadata.get("address", ""),
-        }
-        for m in results.matches
-    ]
+    records = []
+    for m in results.matches:
+        meta = m.metadata
+        address = meta.get("address", "")
+        parts = [p.strip() for p in address.split(",")]
+        city = parts[-2] if len(parts) >= 2 else ""
+        state = parts[-1] if len(parts) >= 1 else ""
+        records.append({
+            "name": meta.get(name_field, "Unknown"),
+            "city": city,
+            "state": state,
+            "phone": meta.get("phone_number", "N/A"),
+            "address": address,
+        })
+    return records
 
 
 async def search(

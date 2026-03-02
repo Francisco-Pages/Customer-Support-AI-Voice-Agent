@@ -27,6 +27,7 @@ from app.config import settings
 from app.core.security import validate_twilio_signature
 from app.dependencies import get_db, get_redis
 from app.services import call as call_service
+from app.services import customer as customer_service
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,7 @@ async def inbound_call(
     From: str = Form(...),
     To: str = Form(...),
     CallStatus: str = Form(...),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Twilio calls this endpoint when a customer dials in.
@@ -86,11 +88,37 @@ async def inbound_call(
     Returns TwiML that dials the LiveKit SIP server. LiveKit routes the
     call to a room and dispatches the hvac-support agent via the SIP
     dispatch rule configured with `lk sip dispatch create`.
+
+    Also creates the call record in the DB and stores the Twilio Call SID
+    in Redis (keyed by caller phone) so the agent can retrieve it on entry
+    and link it to the LiveKit room / post-call transcript.
     """
     body = dict(await request.form())
     validate_twilio_signature(request, body)
 
     logger.info("Inbound call | CallSid=%s From=%s To=%s", CallSid, From, To)
+
+    # Create the call record. Look up the customer so we can link the record
+    # to an existing account; unknown callers get customer_id=None.
+    try:
+        customer = await customer_service.get_by_phone(db, From)
+        await call_service.create_call(
+            db,
+            twilio_call_sid=CallSid,
+            direction="inbound",
+            customer_id=customer.id if customer else None,
+        )
+        # db.commit() is handled by the get_db dependency on a clean exit
+    except Exception:
+        logger.warning("Could not create call record | CallSid=%s", CallSid, exc_info=True)
+
+    # Store CallSid in Redis so the agent can read it by caller phone in on_enter().
+    # TTL matches the active_call key (2 hours) — more than enough for any call.
+    try:
+        redis = await get_redis()
+        await redis.set(f"call_sid:{From}", CallSid, ex=7200)
+    except Exception:
+        logger.warning("Could not store call_sid in Redis | CallSid=%s", CallSid, exc_info=True)
 
     # Route to LiveKit using the dialled Twilio number (To) as the SIP identifier.
     # LiveKit's inbound trunk matches on this number.
