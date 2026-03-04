@@ -52,6 +52,7 @@ class CallRecord(BaseModel):
     id: UUID
     customer_id: UUID | None
     direction: str
+    caller_phone: str | None
     twilio_call_sid: str
     started_at: str | None
     ended_at: str | None
@@ -112,6 +113,7 @@ def _call_to_record(call) -> CallRecord:
         id=call.id,
         customer_id=call.customer_id,
         direction=call.direction,
+        caller_phone=call.caller_phone,
         twilio_call_sid=call.twilio_call_sid,
         started_at=call.started_at.isoformat() if call.started_at else None,
         ended_at=call.ended_at.isoformat() if call.ended_at else None,

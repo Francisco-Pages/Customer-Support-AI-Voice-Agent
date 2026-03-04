@@ -16,6 +16,7 @@ SIP Integration overview:
          → LiveKit SIP server → LiveKit room → hvac-support agent
 """
 
+import json
 import logging
 
 from fastapi import APIRouter, Depends, Form, Request
@@ -107,6 +108,7 @@ async def inbound_call(
             twilio_call_sid=CallSid,
             direction="inbound",
             customer_id=customer.id if customer else None,
+            caller_phone=From,
         )
         # db.commit() is handled by the get_db dependency on a clean exit
     except Exception:
@@ -198,21 +200,32 @@ async def call_status(
         # Check whether the agent queued a transfer for this call.
         try:
             redis = await get_redis()
-            transfer_number = await redis.get(f"transfer:{CallSid}")
-            if transfer_number:
+            transfer_raw = await redis.get(f"transfer:{CallSid}")
+            if transfer_raw:
                 await redis.delete(f"transfer:{CallSid}")
+                transfer_data = json.loads(transfer_raw)
+                transfer_number = transfer_data["to"]
+                caller_phone = transfer_data.get("from")
                 response = VoiceResponse()
                 response.dial(
                     transfer_number,
-                    caller_id=settings.twilio_phone_number,
+                    caller_id=caller_phone or settings.twilio_phone_number,
                     timeout=30,
                 )
                 twiml_str = str(response)
                 logger.info(
-                    "Bridging caller to transfer number | CallSid=%s to=%s twiml=%s",
+                    "Bridging caller to transfer number | CallSid=%s to=%s caller_id=%s twiml=%s",
                     CallSid,
                     transfer_number,
+                    caller_phone,
                     twiml_str,
+                )
+                await call_service.finalize_call(
+                    db,
+                    twilio_call_sid=CallSid,
+                    twilio_status=DialCallStatus,
+                    duration_sec=int(DialCallDuration),
+                    resolution="transferred",
                 )
                 return _twiml_response(response)
         except Exception:

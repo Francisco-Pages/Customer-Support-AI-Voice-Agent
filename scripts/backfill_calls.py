@@ -40,12 +40,13 @@ async def backfill(dry_run: bool) -> None:
     twilio = TwilioClient(settings.twilio_account_sid, settings.twilio_auth_token)
 
     async with AsyncSessionLocal() as db:
-        # Fetch all call rows missing at least one of the three fields
+        # Fetch all call rows missing at least one of the four fields
         result = await db.execute(
             select(Call).where(
                 (Call.ended_at.is_(None))
                 | (Call.duration_sec.is_(None))
                 | (Call.resolution.is_(None))
+                | (Call.caller_phone.is_(None))
             )
         )
         incomplete = result.scalars().all()
@@ -87,14 +88,17 @@ async def backfill(dry_run: bool) -> None:
             )
             resolution = call.resolution or _resolve_resolution(twilio_call.status)
 
+            caller_phone = twilio_call._from
+
             logger.info(
-                "%sSID %s | status=%s duration=%ss ended_at=%s resolution=%s",
+                "%sSID %s | status=%s duration=%ss ended_at=%s resolution=%s caller_phone=%s",
                 "[DRY RUN] " if dry_run else "",
                 call.twilio_call_sid,
                 twilio_call.status,
                 duration,
                 ended_at,
                 resolution,
+                caller_phone,
             )
 
             if not dry_run:
@@ -108,6 +112,8 @@ async def backfill(dry_run: bool) -> None:
                     row.duration_sec = duration
                 if row.resolution is None:
                     row.resolution = resolution
+                if row.caller_phone is None:
+                    row.caller_phone = caller_phone
 
             updated += 1
 

@@ -68,7 +68,25 @@ _FILLER_TURNS = {
     "that's all", "thats all", "nothing else", "no thanks", "no thank you",
     "not yet", "not really", "not sure", "maybe",
     "go ahead", "please", "please go ahead",
+    # Transfer / escalation intent — no product knowledge needed.
+    "transfer me", "transfer me to an agent", "transfer me to a human",
+    "speak to an agent", "speak to a person", "speak to a human",
+    "speak to a representative", "talk to an agent", "talk to a person",
+    "talk to a human", "talk to a representative",
+    "i want to speak to a human", "i want to talk to a human",
+    "i want to speak to an agent", "i want to talk to an agent",
+    "connect me to an agent", "connect me to a human",
+    "give me a human", "get me a human", "get me an agent",
+    "live agent", "live person", "real person", "actual person",
 }
+
+# Queries matching this pattern carry no technical content — skip RAG entirely.
+# Checked after _FILLER_TURNS so exact-match short-circuits first.
+_SKIP_RAG_PATTERN = re.compile(
+    r"\b(transfer|escalat|speak\s+to|talk\s+to|connect\s+me|give\s+me|get\s+me)"
+    r"\b.{0,40}\b(agent|human|person|representative|rep|specialist|someone)\b",
+    re.IGNORECASE,
+)
 
 # All namespaces — used as the fallback when no routing rule matches.
 _ALL_NAMESPACES = [
@@ -367,8 +385,13 @@ async def retrieve(
     # Skip RAG for short conversational turns that carry no technical content.
     # This avoids one embedding call + 4 Pinecone queries on acknowledgements,
     # confirmations, and filler responses where injected context adds no value.
-    if query.lower() in _FILLER_TURNS:
+    _normalized = query.lower().strip("?.!,")
+    if _normalized in _FILLER_TURNS:
         logger.debug("RAG skipped — conversational turn | query=%r", query)
+        return ""
+
+    if _SKIP_RAG_PATTERN.search(query):
+        logger.debug("RAG skipped — transfer/escalation intent | query=%r", query)
         return ""
 
     namespaces = _route_namespaces(query)

@@ -24,12 +24,14 @@ async def create_call(
     direction: str,
     customer_id: uuid.UUID | None = None,
     livekit_room: str | None = None,
+    caller_phone: str | None = None,
 ) -> Call:
     call = Call(
         twilio_call_sid=twilio_call_sid,
         direction=direction,
         customer_id=customer_id,
         livekit_room=livekit_room,
+        caller_phone=caller_phone,
         started_at=datetime.now(timezone.utc),
     )
     db.add(call)
@@ -54,6 +56,7 @@ async def finalize_call(
     twilio_call_sid: str,
     twilio_status: str,
     duration_sec: int,
+    resolution: str | None = None,
 ) -> Call | None:
     """
     Write the final duration, end timestamp, and resolution after a call ends.
@@ -63,9 +66,15 @@ async def finalize_call(
     since the call isn't done yet.
 
     Resolution logic:
+      - If `resolution` is explicitly provided, use it (only if not already set).
       - If the agent already set a resolution during the call, preserve it.
       - If not, derive it from the Twilio status: "completed" → "resolved",
         anything else → "abandoned".
+
+    For transferred calls this is called twice: once at the moment of transfer
+    (DialCallStatus callback) with resolution="transferred", and again at the
+    terminal callback after the bridged leg ends. The second call is a no-op
+    for ended_at and duration_sec since they are already set.
     """
     if twilio_status not in _TERMINAL_STATUSES:
         return None
@@ -74,13 +83,35 @@ async def finalize_call(
     if not call:
         return None
 
-    call.ended_at = datetime.now(timezone.utc)
-    call.duration_sec = duration_sec
+    # Only write timing fields if not already set (preserves transfer-time values
+    # when the terminal callback fires after the bridged leg completes).
+    if call.ended_at is None:
+        call.ended_at = datetime.now(timezone.utc)
+    if call.duration_sec is None:
+        call.duration_sec = duration_sec
 
     if call.resolution is None:
-        call.resolution = "resolved" if twilio_status == "completed" else "abandoned"
+        if resolution is not None:
+            call.resolution = resolution
+        else:
+            call.resolution = "resolved" if twilio_status == "completed" else "abandoned"
 
     await db.flush()
+    return call
+
+
+async def flag_safety_event(db: AsyncSession, caller_phone: str) -> Call | None:
+    """Mark the most recent call from caller_phone as a safety event."""
+    result = await db.execute(
+        select(Call)
+        .where(Call.caller_phone == caller_phone)
+        .order_by(Call.started_at.desc())
+        .limit(1)
+    )
+    call = result.scalar_one_or_none()
+    if call:
+        call.safety_event = True
+        await db.flush()
     return call
 
 

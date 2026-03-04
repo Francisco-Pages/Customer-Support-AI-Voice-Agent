@@ -18,6 +18,7 @@ LIVEKIT_API_KEY, and LIVEKIT_API_SECRET environment variables.
 
 import asyncio
 import contextlib
+import json
 import logging
 import re
 import uuid
@@ -572,7 +573,8 @@ class HVACAssistant(Agent):
         Escalate the call to a live human specialist.
         Use when: the caller asks to speak to a person, the issue is outside your
         scope, or you have been unable to resolve the problem.
-        Always tell the caller they are being transferred before this ends the session.
+        Call this tool immediately — do not say anything first. The tool speaks
+        the farewell to the caller automatically.
         """
         logger.info("Live transfer requested | reason=%r", reason)
 
@@ -594,18 +596,31 @@ class HVACAssistant(Agent):
         # and returns TwiML that bridges the caller to the human agent line.
         try:
             redis = await aioredis.from_url(settings.redis_url, decode_responses=True)
-            await redis.set(f"transfer:{call_sid}", settings.transfer_phone_number, ex=300)
+            await redis.set(
+                f"transfer:{call_sid}",
+                json.dumps({"to": settings.transfer_phone_number, "from": caller_phone}),
+                ex=300,
+            )
             await redis.aclose()
         except Exception:
             logger.warning(
                 "Could not write transfer key to Redis | call_sid=%s", call_sid
             )
 
-        # After the farewell TTS plays (~8 s), remove the SIP participant from the
-        # LiveKit room. This sends a SIP BYE to Twilio, which ends the <Dial> and
-        # triggers the action URL — the correct path to bridge the caller.
+        # Speak the farewell directly via session.say() so we own the SpeechHandle.
+        # This avoids any race between LLM response scheduling and our listener,
+        # and ensures we await exactly this utterance — nothing else.
+        farewell_handle = self.session.say(
+            "I'm connecting you with a specialist now. Thank you for your patience, goodbye!",
+            allow_interruptions=False,
+        )
+
         async def _remove_sip_for_transfer() -> None:
-            await asyncio.sleep(8)
+            try:
+                await asyncio.wait_for(asyncio.shield(farewell_handle._done_fut), timeout=15.0)
+            except asyncio.TimeoutError:
+                logger.warning("Transfer farewell TTS timed out — removing SIP participant anyway")
+
             try:
                 async with lk_api.LiveKitAPI(
                     url=settings.livekit_url,
@@ -634,9 +649,7 @@ class HVACAssistant(Agent):
 
         return (
             f"Transfer to a live specialist has been initiated. Reason: {reason}. "
-            "Say to the caller: 'I'm connecting you with a specialist right now — "
-            "please hold for just a moment. Thank you for your patience.' "
-            "Then say goodbye and wish them well. Do not say anything further after that."
+            "The farewell has already been spoken. Do not say anything further."
         )
 
     @function_tool
@@ -961,6 +974,13 @@ async def hvac_agent(ctx: JobContext) -> None:
                 f'"{_EMERGENCY_RESPONSE}"'
             )
         )
+        if caller_phone:
+            try:
+                async with AsyncSessionLocal() as db:
+                    await call_service.flag_safety_event(db, caller_phone)
+                    await db.commit()
+            except Exception:
+                logger.warning("Could not flag safety event in DB | phone=%s", caller_phone, exc_info=True)
 
     # ------------------------------------------------------------------
     # Start the session

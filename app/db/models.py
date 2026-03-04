@@ -135,6 +135,7 @@ class Call(Base):
     )
     # "inbound" | "outbound"
     direction: Mapped[str] = mapped_column(String(10), nullable=False)
+    caller_phone: Mapped[str | None] = mapped_column(String(20))
     twilio_call_sid: Mapped[str] = mapped_column(
         String(50), unique=True, nullable=False, index=True
     )

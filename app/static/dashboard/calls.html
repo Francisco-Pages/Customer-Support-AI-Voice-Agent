@@ -52,6 +52,7 @@
         <thead>
           <tr>
             <th>Started</th>
+            <th>Caller</th>
             <th>Direction</th>
             <th>Duration</th>
             <th>Resolution</th>
@@ -60,7 +61,7 @@
           </tr>
         </thead>
         <tbody id="callsBody">
-          <tr class="loading-row"><td colspan="6">Loading…</td></tr>
+          <tr class="loading-row"><td colspan="7">Loading…</td></tr>
         </tbody>
       </table>
 
@@ -158,13 +159,14 @@
 
         if (!data.calls || data.calls.length === 0) {
           document.getElementById('callsBody').innerHTML =
-            '<tr class="empty-row"><td colspan="6">No calls match your filters.</td></tr>';
+            '<tr class="empty-row"><td colspan="7">No calls match your filters.</td></tr>';
           return;
         }
 
         document.getElementById('callsBody').innerHTML = data.calls.map(c => `
           <tr onclick="openModal(${JSON.stringify(c).replace(/"/g, '&quot;')})">
             <td>${fmtDate(c.started_at)}</td>
+            <td class="td-muted">${c.caller_phone || '—'}</td>
             <td><span class="badge ${c.direction === 'inbound' ? 'badge-blue' : 'badge-gray'}">${c.direction}</span></td>
             <td>${fmtDuration(c.duration_sec)}</td>
             <td>${resolutionBadge(c.resolution)}</td>
@@ -174,7 +176,7 @@
         `).join('');
       } catch (err) {
         document.getElementById('callsBody').innerHTML =
-          `<tr class="empty-row"><td colspan="6">Error loading calls: ${err.message}</td></tr>`;
+          `<tr class="empty-row"><td colspan="7">Error loading calls: ${err.message}</td></tr>`;
       }
     }
 
