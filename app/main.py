@@ -3,6 +3,8 @@ import logging.config
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.routers import admin, stream, telephony
@@ -57,6 +59,24 @@ def create_app() -> FastAPI:
     @app.get("/health", tags=["Health"])
     async def health_check():
         return {"status": "ok"}
+
+    # ------------------------------------------------------------------
+    # Dashboard redirect
+    # ------------------------------------------------------------------
+
+    @app.get("/dashboard", include_in_schema=False)
+    async def dashboard_redirect():
+        return RedirectResponse(url="/dashboard/index.html")
+
+    # ------------------------------------------------------------------
+    # Static files (dashboard) — must come AFTER routes
+    # ------------------------------------------------------------------
+
+    app.mount(
+        "/dashboard",
+        StaticFiles(directory="app/static/dashboard", html=True),
+        name="dashboard",
+    )
 
     # ------------------------------------------------------------------
     # Startup / shutdown lifecycle

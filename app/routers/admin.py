@@ -12,12 +12,13 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import verify_admin_api_key
-from app.dependencies import get_db
+from app.dependencies import get_db, get_redis
 from app.services import call as call_service
 from app.services import campaign as campaign_service
 
@@ -57,6 +58,7 @@ class CallRecord(BaseModel):
     duration_sec: int | None
     resolution: str | None
     summary: str | None
+    transcript: str | None
     safety_event: bool
 
 
@@ -78,6 +80,14 @@ class QueueEntry(BaseModel):
 class QueueListResponse(BaseModel):
     total: int
     entries: list[QueueEntry]
+
+
+class StatsResponse(BaseModel):
+    active_calls: int
+    calls_today: int
+    safety_events_today: int
+    avg_duration_today: float | None
+    recent_calls: list[CallRecord]
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +118,7 @@ def _call_to_record(call) -> CallRecord:
         duration_sec=call.duration_sec,
         resolution=call.resolution,
         summary=call.summary,
+        transcript=call.transcript,
         safety_event=call.safety_event,
     )
 
@@ -121,6 +132,29 @@ def _queue_to_entry(entry) -> QueueEntry:
         status=entry.status,
         attempts=entry.attempts,
         twilio_call_sid=entry.twilio_call_sid,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Stats
+# ---------------------------------------------------------------------------
+
+
+@router.get("/stats", response_model=StatsResponse)
+async def get_stats(
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    """Live overview: active call count, today's aggregate stats, and 10 most recent calls."""
+    active_keys = await redis.keys("active_call:*")
+    today = await call_service.get_today_stats(db)
+    _, recent = await call_service.list_calls(db, limit=10, offset=0)
+    return StatsResponse(
+        active_calls=len(active_keys),
+        calls_today=today.calls_today,
+        safety_events_today=today.safety_events_today,
+        avg_duration_today=today.avg_duration_today,
+        recent_calls=[_call_to_record(c) for c in recent],
     )
 
 

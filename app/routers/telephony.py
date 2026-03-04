@@ -169,6 +169,7 @@ async def call_status(
     CallStatus: str = Form(...),
     CallDuration: str = Form(default="0"),
     DialCallStatus: str | None = Form(default=None),
+    DialCallDuration: str = Form(default="0"),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -218,7 +219,13 @@ async def call_status(
             logger.warning(
                 "Redis error checking transfer key | CallSid=%s", CallSid, exc_info=True
             )
-        # No transfer pending — hang up cleanly.
+        # No transfer pending — finalize the call record and hang up cleanly.
+        await call_service.finalize_call(
+            db,
+            twilio_call_sid=CallSid,
+            twilio_status=DialCallStatus,
+            duration_sec=int(DialCallDuration),
+        )
         return _twiml_response(VoiceResponse())
 
     # Terminal status callback — persist the final call record.

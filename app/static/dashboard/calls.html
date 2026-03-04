@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HVAC Admin — Call Log</title>
+  <link rel="stylesheet" href="/dashboard/style.css" />
+</head>
+<body>
+  <script src="/dashboard/app.js"></script>
+  <script>
+    if (!getKey()) { /* redirected */ }
+    renderNav('calls');
+  </script>
+
+  <div class="page">
+    <div class="page-header">
+      <span class="page-title">Call Log</span>
+    </div>
+
+    <div class="card">
+      <!-- Filter bar -->
+      <div class="filter-bar">
+        <div class="filter-group">
+          <label class="filter-label">From</label>
+          <input type="date" id="fDateFrom" />
+        </div>
+        <div class="filter-group">
+          <label class="filter-label">To</label>
+          <input type="date" id="fDateTo" />
+        </div>
+        <div class="filter-group">
+          <label class="filter-label">Resolution</label>
+          <select id="fResolution">
+            <option value="">All</option>
+            <option value="resolved">Resolved</option>
+            <option value="abandoned">Abandoned</option>
+            <option value="transferred">Transferred</option>
+            <option value="escalated">Escalated</option>
+          </select>
+        </div>
+        <label class="filter-checkbox">
+          <input type="checkbox" id="fSafety" />
+          Safety events only
+        </label>
+        <button class="btn btn-primary" onclick="applyFilters()">Apply</button>
+        <button class="btn btn-ghost" onclick="clearFilters()">Clear</button>
+      </div>
+
+      <!-- Table -->
+      <table>
+        <thead>
+          <tr>
+            <th>Started</th>
+            <th>Direction</th>
+            <th>Duration</th>
+            <th>Resolution</th>
+            <th>Safety</th>
+            <th>Summary</th>
+          </tr>
+        </thead>
+        <tbody id="callsBody">
+          <tr class="loading-row"><td colspan="6">Loading…</td></tr>
+        </tbody>
+      </table>
+
+      <!-- Pagination -->
+      <div class="pagination">
+        <span class="page-info" id="pageInfo"></span>
+        <button class="btn btn-ghost" id="btnPrev" onclick="prevPage()">← Prev</button>
+        <button class="btn btn-ghost" id="btnNext" onclick="nextPage()">Next →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal -->
+  <div class="modal-overlay" id="modalOverlay" onclick="closeModal(event)">
+    <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <span class="modal-title" id="modalTitle">Call Detail</span>
+        <button class="modal-close" onclick="closeModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="panel-section">
+          <div class="panel-section-title">Summary</div>
+          <div class="panel-section-body" id="modalSummary">—</div>
+        </div>
+        <div class="panel-section" style="margin-top:20px">
+          <div class="panel-section-title">Transcript</div>
+          <div class="panel-section-body" id="modalTranscript" style="font-family:monospace;font-size:12px;background:#f8f9fc;padding:12px;border-radius:6px;max-height:340px;overflow-y:auto;">—</div>
+        </div>
+        <div class="panel-section" style="margin-top:20px">
+          <div class="panel-section-title">Metadata</div>
+          <div class="panel-section-body" id="modalMeta">—</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const PAGE_SIZE = 50;
+    let currentPage = 0;
+    let totalCount = 0;
+    let activeFilters = {};
+
+    function applyFilters() {
+      activeFilters = {
+        date_from: document.getElementById('fDateFrom').value
+          ? document.getElementById('fDateFrom').value + 'T00:00:00'
+          : '',
+        date_to: document.getElementById('fDateTo').value
+          ? document.getElementById('fDateTo').value + 'T23:59:59'
+          : '',
+        resolution: document.getElementById('fResolution').value,
+        safety_event: document.getElementById('fSafety').checked ? 'true' : '',
+      };
+      currentPage = 0;
+      loadCalls();
+    }
+
+    function clearFilters() {
+      document.getElementById('fDateFrom').value = '';
+      document.getElementById('fDateTo').value = '';
+      document.getElementById('fResolution').value = '';
+      document.getElementById('fSafety').checked = false;
+      activeFilters = {};
+      currentPage = 0;
+      loadCalls();
+    }
+
+    function prevPage() {
+      if (currentPage > 0) { currentPage--; loadCalls(); }
+    }
+
+    function nextPage() {
+      if ((currentPage + 1) * PAGE_SIZE < totalCount) { currentPage++; loadCalls(); }
+    }
+
+    async function loadCalls() {
+      document.getElementById('callsBody').innerHTML =
+        '<tr class="loading-row"><td colspan="6">Loading…</td></tr>';
+
+      try {
+        const data = await apiFetch('/admin/calls', {
+          ...activeFilters,
+          limit: PAGE_SIZE,
+          offset: currentPage * PAGE_SIZE,
+        });
+        if (!data) return;
+
+        totalCount = data.total;
+        const start = currentPage * PAGE_SIZE + 1;
+        const end = Math.min(start + PAGE_SIZE - 1, totalCount);
+        document.getElementById('pageInfo').textContent =
+          totalCount === 0 ? 'No results' : `${start}–${end} of ${totalCount}`;
+        document.getElementById('btnPrev').disabled = currentPage === 0;
+        document.getElementById('btnNext').disabled = end >= totalCount;
+
+        if (!data.calls || data.calls.length === 0) {
+          document.getElementById('callsBody').innerHTML =
+            '<tr class="empty-row"><td colspan="6">No calls match your filters.</td></tr>';
+          return;
+        }
+
+        document.getElementById('callsBody').innerHTML = data.calls.map(c => `
+          <tr onclick="openModal(${JSON.stringify(c).replace(/"/g, '&quot;')})">
+            <td>${fmtDate(c.started_at)}</td>
+            <td><span class="badge ${c.direction === 'inbound' ? 'badge-blue' : 'badge-gray'}">${c.direction}</span></td>
+            <td>${fmtDuration(c.duration_sec)}</td>
+            <td>${resolutionBadge(c.resolution)}</td>
+            <td>${safetyBadge(c.safety_event)}</td>
+            <td class="td-muted">${c.summary ? c.summary.slice(0, 90) + (c.summary.length > 90 ? '…' : '') : '—'}</td>
+          </tr>
+        `).join('');
+      } catch (err) {
+        document.getElementById('callsBody').innerHTML =
+          `<tr class="empty-row"><td colspan="6">Error loading calls: ${err.message}</td></tr>`;
+      }
+    }
+
+    async function openModal(call) {
+      document.getElementById('modalTitle').textContent =
+        `${call.direction.toUpperCase()} · ${fmtDate(call.started_at)}`;
+      document.getElementById('modalSummary').textContent = call.summary || 'No summary available.';
+      document.getElementById('modalMeta').textContent =
+        `SID: ${call.twilio_call_sid}\nDuration: ${fmtDuration(call.duration_sec)}\nResolution: ${call.resolution || '—'}\nEnded: ${fmtDate(call.ended_at)}`;
+
+      // Fetch full record for transcript
+      document.getElementById('modalTranscript').textContent = 'Loading transcript…';
+      document.getElementById('modalOverlay').classList.add('open');
+
+      try {
+        const full = await apiFetch(`/admin/calls/${call.id}`);
+        document.getElementById('modalTranscript').textContent =
+          full && full.transcript ? full.transcript : 'No transcript available.';
+      } catch {
+        document.getElementById('modalTranscript').textContent = 'Failed to load transcript.';
+      }
+    }
+
+    function closeModal(event) {
+      if (!event || event.target === document.getElementById('modalOverlay')) {
+        document.getElementById('modalOverlay').classList.remove('open');
+      }
+    }
+
+    // Initial load
+    loadCalls();
+  </script>
+</body>
+</html>

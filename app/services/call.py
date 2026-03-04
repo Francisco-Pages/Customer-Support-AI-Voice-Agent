@@ -4,6 +4,7 @@ Call service — create and finalize records in the calls table.
 
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from sqlalchemy import func, select
@@ -108,6 +109,45 @@ async def save_post_call_data(
 
     await db.flush()
     return call
+
+
+@dataclass
+class TodayStats:
+    calls_today: int
+    safety_events_today: int
+    avg_duration_today: float | None
+
+
+async def get_today_stats(db: AsyncSession) -> TodayStats:
+    """Return aggregate counts for calls started today (UTC)."""
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    calls_today = (
+        await db.execute(
+            select(func.count()).select_from(Call).where(Call.started_at >= today_start)
+        )
+    ).scalar_one()
+
+    safety_events_today = (
+        await db.execute(
+            select(func.count())
+            .select_from(Call)
+            .where(Call.started_at >= today_start, Call.safety_event.is_(True))
+        )
+    ).scalar_one()
+
+    avg_duration_today = (
+        await db.execute(
+            select(func.avg(Call.duration_sec))
+            .where(Call.started_at >= today_start, Call.duration_sec.isnot(None))
+        )
+    ).scalar_one()
+
+    return TodayStats(
+        calls_today=calls_today,
+        safety_events_today=safety_events_today,
+        avg_duration_today=float(avg_duration_today) if avg_duration_today is not None else None,
+    )
 
 
 async def list_calls(

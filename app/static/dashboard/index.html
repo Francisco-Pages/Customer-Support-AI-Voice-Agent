@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HVAC Admin — Overview</title>
+  <link rel="stylesheet" href="/dashboard/style.css" />
+</head>
+<body>
+  <script src="/dashboard/app.js"></script>
+  <script>
+    if (!getKey()) { /* redirected */ }
+    renderNav('overview');
+  </script>
+
+  <div class="page">
+    <div class="page-header">
+      <span class="page-title">Live Overview</span>
+      <span class="page-subtitle" id="lastRefresh"></span>
+    </div>
+
+    <!-- Stat cards -->
+    <div class="stats-grid">
+      <div class="stat-card active">
+        <div class="stat-label">Active Calls</div>
+        <div class="stat-value" id="statActive">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Calls Today</div>
+        <div class="stat-value" id="statToday">—</div>
+      </div>
+      <div class="stat-card danger">
+        <div class="stat-label">Safety Events Today</div>
+        <div class="stat-value" id="statSafety">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Avg Duration Today</div>
+        <div class="stat-value" id="statAvg">—</div>
+      </div>
+    </div>
+
+    <!-- Recent calls table -->
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Recent Calls</span>
+        <button class="refresh-btn" onclick="loadStats()">↻ Refresh</button>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Direction</th>
+            <th>Duration</th>
+            <th>Resolution</th>
+            <th>Safety</th>
+            <th>Summary</th>
+          </tr>
+        </thead>
+        <tbody id="recentBody">
+          <tr class="loading-row"><td colspan="6">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Side panel -->
+  <div class="panel-overlay" id="panelOverlay" onclick="closePanel()"></div>
+  <div class="side-panel" id="sidePanel">
+    <div class="panel-header">
+      <span class="panel-title" id="panelTitle">Call Detail</span>
+      <button class="panel-close" onclick="closePanel()">✕</button>
+    </div>
+    <div class="panel-body">
+      <div class="panel-section">
+        <div class="panel-section-title">Summary</div>
+        <div class="panel-section-body" id="panelSummary">—</div>
+      </div>
+      <div class="panel-section">
+        <div class="panel-section-title">Details</div>
+        <div class="panel-section-body" id="panelDetails">—</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let refreshTimer = null;
+
+    async function loadStats() {
+      try {
+        const data = await apiFetch('/admin/stats');
+        if (!data) return;
+
+        document.getElementById('statActive').textContent = data.active_calls;
+        document.getElementById('statToday').textContent = data.calls_today;
+        document.getElementById('statSafety').textContent = data.safety_events_today;
+        document.getElementById('statAvg').textContent =
+          data.avg_duration_today !== null ? fmtDuration(Math.round(data.avg_duration_today)) : '—';
+
+        const tbody = document.getElementById('recentBody');
+        if (!data.recent_calls || data.recent_calls.length === 0) {
+          tbody.innerHTML = '<tr class="empty-row"><td colspan="6">No calls yet today.</td></tr>';
+        } else {
+          tbody.innerHTML = data.recent_calls.map(c => `
+            <tr onclick="openPanel(${JSON.stringify(c).replace(/"/g, '&quot;')})">
+              <td>${fmtDate(c.started_at)}</td>
+              <td><span class="badge ${c.direction === 'inbound' ? 'badge-blue' : 'badge-gray'}">${c.direction}</span></td>
+              <td>${fmtDuration(c.duration_sec)}</td>
+              <td>${resolutionBadge(c.resolution)}</td>
+              <td>${safetyBadge(c.safety_event)}</td>
+              <td class="td-muted">${c.summary ? c.summary.slice(0, 80) + (c.summary.length > 80 ? '…' : '') : '—'}</td>
+            </tr>
+          `).join('');
+        }
+
+        document.getElementById('lastRefresh').textContent =
+          'Last updated ' + new Date().toLocaleTimeString();
+      } catch (err) {
+        console.error('Failed to load stats', err);
+      }
+    }
+
+    function openPanel(call) {
+      document.getElementById('panelTitle').textContent =
+        `${call.direction.toUpperCase()} · ${fmtDate(call.started_at)}`;
+      document.getElementById('panelSummary').textContent = call.summary || 'No summary available.';
+      document.getElementById('panelDetails').textContent =
+        `SID: ${call.twilio_call_sid}\nDuration: ${fmtDuration(call.duration_sec)}\nResolution: ${call.resolution || '—'}\nEnded: ${fmtDate(call.ended_at)}`;
+
+      document.getElementById('panelOverlay').classList.add('open');
+      document.getElementById('sidePanel').classList.add('open');
+    }
+
+    function closePanel() {
+      document.getElementById('panelOverlay').classList.remove('open');
+      document.getElementById('sidePanel').classList.remove('open');
+    }
+
+    // Initial load + auto-refresh every 10 seconds
+    loadStats();
+    refreshTimer = setInterval(loadStats, 10000);
+  </script>
+</body>
+</html>

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HVAC Admin — Login</title>
+  <link rel="stylesheet" href="/dashboard/style.css" />
+</head>
+<body>
+  <div class="login-wrapper">
+    <div class="login-card">
+      <div class="login-logo">🌡️</div>
+      <div class="login-title">HVAC Admin</div>
+      <div class="login-subtitle">Enter your admin API key to continue</div>
+
+      <form id="loginForm">
+        <div class="form-group">
+          <label class="form-label" for="apiKey">API Key</label>
+          <input
+            class="form-input"
+            type="password"
+            id="apiKey"
+            placeholder="sk-..."
+            autocomplete="current-password"
+            required
+          />
+        </div>
+        <button class="login-btn" type="submit">Sign in</button>
+        <div class="login-error" id="loginError">Invalid API key. Please try again.</div>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    // Redirect immediately if already authenticated
+    if (sessionStorage.getItem('adminKey')) {
+      window.location.href = '/dashboard/index.html';
+    }
+
+    document.getElementById('loginForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const key = document.getElementById('apiKey').value.trim();
+      if (!key) return;
+
+      // Validate by hitting /admin/stats
+      const res = await fetch('/admin/stats', { headers: { 'X-Api-Key': key } });
+      if (res.ok || res.status === 200) {
+        sessionStorage.setItem('adminKey', key);
+        window.location.href = '/dashboard/index.html';
+      } else {
+        document.getElementById('loginError').style.display = 'block';
+      }
+    });
+  </script>
+</body>
+</html>
