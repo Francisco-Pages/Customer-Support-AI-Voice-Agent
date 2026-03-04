@@ -168,33 +168,66 @@ async def call_status(
     CallSid: str = Form(...),
     CallStatus: str = Form(...),
     CallDuration: str = Form(default="0"),
+    DialCallStatus: str | None = Form(default=None),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Twilio posts call lifecycle events here (completed, failed, busy, etc.).
+    Handles two different Twilio callbacks on the same URL:
 
-    Persists the final duration and resolution for terminal statuses.
-    Non-terminal events (ringing, in-progress) are logged and ignored.
+    1. <Dial> action callback — fired when the SIP leg ends (DialCallStatus present).
+       If a transfer is pending (Redis key set by the agent), return TwiML that
+       bridges the caller to the transfer number. Otherwise hang up cleanly.
+
+    2. Terminal status callback — fired when the entire call ends (DialCallStatus
+       absent, CallStatus is completed/failed/etc.). Persists the call record.
     """
     body = dict(await request.form())
     validate_twilio_signature(request, body)
 
     logger.info(
-        "Call status | CallSid=%s Status=%s Duration=%ss",
+        "Call status | CallSid=%s Status=%s Duration=%ss DialCallStatus=%s",
         CallSid,
         CallStatus,
         CallDuration,
+        DialCallStatus,
     )
 
+    if DialCallStatus is not None:
+        # <Dial> action callback — the SIP leg just ended.
+        # Check whether the agent queued a transfer for this call.
+        try:
+            redis = await get_redis()
+            transfer_number = await redis.get(f"transfer:{CallSid}")
+            if transfer_number:
+                await redis.delete(f"transfer:{CallSid}")
+                response = VoiceResponse()
+                response.dial(
+                    transfer_number,
+                    caller_id=settings.twilio_phone_number,
+                    timeout=30,
+                )
+                twiml_str = str(response)
+                logger.info(
+                    "Bridging caller to transfer number | CallSid=%s to=%s twiml=%s",
+                    CallSid,
+                    transfer_number,
+                    twiml_str,
+                )
+                return _twiml_response(response)
+        except Exception:
+            logger.warning(
+                "Redis error checking transfer key | CallSid=%s", CallSid, exc_info=True
+            )
+        # No transfer pending — hang up cleanly.
+        return _twiml_response(VoiceResponse())
+
+    # Terminal status callback — persist the final call record.
     await call_service.finalize_call(
         db,
         twilio_call_sid=CallSid,
         twilio_status=CallStatus,
         duration_sec=int(CallDuration),
     )
-
-    # Twilio calls this URL as the <Dial> action when the SIP leg ends.
-    # It expects TwiML back — return an empty <Response> to hang up cleanly.
     return _twiml_response(VoiceResponse())
 
 

@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     # Redis (AWS ElastiCache)
     redis_url: str  # e.g. redis://localhost:6379/0
 
+    # Transfer
+    transfer_phone_number: str  # E.164 number to bridge callers to when they request a human agent
+
     # Admin API
     admin_api_key: str
 

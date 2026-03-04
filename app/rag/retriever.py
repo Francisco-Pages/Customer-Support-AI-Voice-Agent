@@ -53,13 +53,115 @@ _EMBEDDING_MODEL = "text-embedding-3-small"
 _EMBEDDING_DIMENSIONS = 1536
 _CACHE_TTL_SEC = 3_600  # 1 hour
 
-# Namespaces to query — all queried in parallel, results merged by score.
-_NAMESPACES = [
+# Conversational filler words that never need a knowledge base lookup.
+# If the entire utterance (lowercased, stripped) matches one of these,
+# RAG is skipped entirely — saving one embedding call + 4 Pinecone queries.
+_FILLER_TURNS = {
+    "yes", "no", "yeah", "nope", "yep", "nah",
+    "ok", "okay", "sure", "alright", "fine",
+    "got it", "i see", "i got it", "understood",
+    "thank you", "thanks", "thank you so much", "thanks a lot",
+    "hold on", "one moment", "one sec", "one second", "just a moment",
+    "hello", "hi", "hey",
+    "bye", "goodbye", "good bye",
+    "that's all", "thats all", "nothing else", "no thanks", "no thank you",
+    "not yet", "not really", "not sure", "maybe",
+    "go ahead", "please", "please go ahead",
+}
+
+# All namespaces — used as the fallback when no routing rule matches.
+_ALL_NAMESPACES = [
     "unit-specs",
     "warranty-policy-details",
     "error-codes",
     "common-troubleshooting",
 ]
+
+# ---------------------------------------------------------------------------
+# Namespace routing
+#
+# Each rule is a (compiled_regex, [namespaces]) pair. The query is matched
+# against rules in order; all matching rules contribute their namespaces.
+# If no rule fires, _ALL_NAMESPACES is used as a safe fallback.
+#
+# Keeping this as a plain list makes it easy to add/adjust rules without
+# touching any other code.
+# ---------------------------------------------------------------------------
+
+_NS_UNIT_SPECS = "unit-specs"
+_NS_WARRANTY = "warranty-policy-details"
+_NS_ERROR_CODES = "error-codes"
+_NS_TROUBLESHOOTING = "common-troubleshooting"
+
+_ROUTING_RULES: list[tuple[re.Pattern, list[str]]] = [
+    (
+        re.compile(
+            r"\b("
+            r"model|serial|btu|ton(?:s|nage)?|refrigerant|r-?4(?:10a?|54b?|32)|"
+            r"indoor|outdoor|unit|compatibl|line\s*set|capacity|zone|"
+            r"install|combination|multi.?zone|single.?zone|"
+            r"ch-|os-|brv-|astoria|olivia|sophia|bravo|olmo|"
+            r"spec(?:s|ification)?|watt|amp|voltage|phase|clearance|dimension"
+            r")\b",
+            re.IGNORECASE,
+        ),
+        [_NS_UNIT_SPECS],
+    ),
+    (
+        re.compile(
+            r"\b("
+            r"warrant(?:y|ies)|cover(?:age|ed)|register|registration|"
+            r"claim|years?\s+warrant|parts?\s+warrant|compressor\s+warrant|"
+            r"what(?:'s|\s+is)\s+covered|extended\s+warrant|expire"
+            r")\b",
+            re.IGNORECASE,
+        ),
+        [_NS_WARRANTY],
+    ),
+    (
+        re.compile(
+            r"\b("
+            r"error\s*code|fault\s*code|e\d+|f\d+|"
+            r"flash(?:ing)?|blink(?:ing)?|display(?:\s+shows?)?|"
+            r"code\s+on|shows?\s+(?:an?\s+)?(?:error|fault|code)"
+            r")\b",
+            re.IGNORECASE,
+        ),
+        [_NS_ERROR_CODES],
+    ),
+    (
+        re.compile(
+            r"\b("
+            r"not\s+(?:cool|heat|work|turn|run)|won'?t\s+(?:cool|heat|start|turn)|"
+            r"warm\s+air|no\s+(?:cool|heat|air)|ice\s+on|frost(?:ing)?|"
+            r"leak(?:ing)?|noise|sound|vibrat|filter|breaker|trip(?:ping)?|"
+            r"short\s*cycl|blow(?:ing)?\s+warm|not\s+enough\s+(?:cool|heat)|"
+            r"trouble|problem|issue|broken|not\s+work|doesn'?t\s+work"
+            r")\b",
+            re.IGNORECASE,
+        ),
+        [_NS_TROUBLESHOOTING],
+    ),
+]
+
+
+def _route_namespaces(query: str) -> list[str]:
+    """
+    Return the namespaces to query for a given user utterance.
+    Matches all applicable routing rules and deduplicates.
+    Falls back to all namespaces if nothing matches.
+    """
+    matched: list[str] = []
+    for pattern, namespaces in _ROUTING_RULES:
+        if pattern.search(query):
+            for ns in namespaces:
+                if ns not in matched:
+                    matched.append(ns)
+    if not matched:
+        logger.debug("RAG routing: no rule matched — querying all namespaces")
+        return _ALL_NAMESPACES
+    logger.debug("RAG routing: %s → %s", query[:60], matched)
+    return matched
 
 # ---------------------------------------------------------------------------
 # Lazy-initialised module-level clients
@@ -70,6 +172,7 @@ _NAMESPACES = [
 # ---------------------------------------------------------------------------
 
 _pinecone_client: Pinecone | None = None
+_pinecone_index = None  # cached Index object — built once, reused across all queries
 _openai_client: AsyncOpenAI | None = None
 _redis_client: aioredis.Redis | None = None
 
@@ -91,6 +194,13 @@ def _pc() -> Pinecone:
     if _pinecone_client is None:
         _pinecone_client = Pinecone(api_key=settings.pinecone_api_key)
     return _pinecone_client
+
+
+def _index():
+    global _pinecone_index
+    if _pinecone_index is None:
+        _pinecone_index = _pc().Index(settings.pinecone_index_name)
+    return _pinecone_index
 
 
 def _oai() -> AsyncOpenAI:
@@ -207,8 +317,7 @@ def _query_namespace_sync(
     Returns a list of (score, passage_text) tuples.
     Always called via run_in_executor.
     """
-    index = _pc().Index(settings.pinecone_index_name)
-    results = index.query(
+    results = _index().query(
         vector=vector,
         top_k=top_k,
         namespace=namespace,
@@ -254,7 +363,15 @@ async def retrieve(
     if not query:
         return ""
 
-    cache_key = _cache_key(query, _NAMESPACES)
+    # Skip RAG for short conversational turns that carry no technical content.
+    # This avoids one embedding call + 4 Pinecone queries on acknowledgements,
+    # confirmations, and filler responses where injected context adds no value.
+    if query.lower() in _FILLER_TURNS:
+        logger.debug("RAG skipped — conversational turn | query=%r", query)
+        return ""
+
+    namespaces = _route_namespaces(query)
+    cache_key = _cache_key(query, namespaces)
 
     # 1. Cache lookup
     cached = await _cache_get(cache_key)
@@ -265,9 +382,9 @@ async def retrieve(
     # 2. Embed the query
     vector = await _embed(query)
 
-    # 3. Query all namespaces concurrently
+    # 3. Query routed namespaces concurrently
     #    Each namespace runs in a thread (sync SDK); asyncio.gather runs them in parallel.
-    per_ns = max(3, top_k)  # fetch a few from each namespace before merging
+    per_ns = max(3, top_k)
     loop = asyncio.get_event_loop()
     ns_results: list[list[tuple[float, str]]] = await asyncio.gather(
         *[
@@ -275,7 +392,7 @@ async def retrieve(
                 None,
                 partial(_query_namespace_sync, vector, ns, per_ns),
             )
-            for ns in _NAMESPACES
+            for ns in namespaces
         ]
     )
 
@@ -296,9 +413,9 @@ async def retrieve(
     await _cache_set(cache_key, context)
 
     logger.info(
-        "RAG retrieved %d passages from %d namespaces | query=%r",
+        "RAG retrieved %d passages from %s | query=%r",
         len(top_passages),
-        len(_NAMESPACES),
+        namespaces,
         query[:80],
     )
     return context

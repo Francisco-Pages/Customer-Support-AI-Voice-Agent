@@ -22,11 +22,11 @@ import logging
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import Annotated
+from typing import Annotated, AsyncIterable, AsyncGenerator
 
 import redis.asyncio as aioredis
 
-from livekit import agents, rtc
+from livekit import agents, api as lk_api, rtc
 from livekit.agents import (
     AgentServer,
     AgentSession,
@@ -115,6 +115,7 @@ class HVACAssistant(Agent):
         self._room_name: str | None = room_name
         self._twilio_call_sid: str | None = None
         self._sms_task: asyncio.Task | None = None
+        self._session_ref: AgentSession | None = None  # Set by hvac_agent() after start
 
     # ------------------------------------------------------------------
     # Session lifecycle hooks
@@ -210,14 +211,15 @@ class HVACAssistant(Agent):
         """
         lines = []
         for msg in self.session.history.messages():
+            ts = datetime.fromtimestamp(msg.created_at, tz=timezone.utc).strftime("%H:%M:%S")
             if msg.role == "user":
                 text = msg.text_content
                 if text:
-                    lines.append(f"Customer: {text}")
+                    lines.append(f"[{ts}] Customer: {text}")
             elif msg.role == "assistant":
                 text = msg.text_content
                 if text:
-                    lines.append(f"Alex: {text}")
+                    lines.append(f"[{ts}] Alex: {text}")
         return "\n".join(lines)
 
     async def _generate_summary(self, transcript: str) -> str:
@@ -244,6 +246,28 @@ class HVACAssistant(Agent):
             temperature=0,
         )
         return response.choices[0].message.content or ""
+
+    # ------------------------------------------------------------------
+    # TTS pipeline node — sanitize LLM output before synthesis
+    # ------------------------------------------------------------------
+
+    async def tts_node(
+        self,
+        text: AsyncIterable[str],
+        model_settings,
+    ) -> AsyncGenerator[rtc.AudioFrame, None]:
+        """Strip markdown characters the LLM may emit before sending to TTS."""
+
+        async def _clean(source: AsyncIterable[str]) -> AsyncGenerator[str, None]:
+            async for chunk in source:
+                # Remove bold/italic markers and backticks; strip leading '#' headers
+                chunk = re.sub(r"[*`]", "", chunk)
+                chunk = re.sub(r"(?m)^#+\s*", "", chunk)
+                if chunk:
+                    yield chunk
+
+        async for frame in Agent.default.tts_node(self, _clean(text), model_settings):
+            yield frame
 
     async def on_user_turn_completed(
         self, turn_ctx: ChatContext, new_message: ChatMessage
@@ -551,16 +575,68 @@ class HVACAssistant(Agent):
         Always tell the caller they are being transferred before this ends the session.
         """
         logger.info("Live transfer requested | reason=%r", reason)
-        # TODO: For immediate SIP transfer, call the Twilio REST API:
-        #   self._twilio.calls(call_sid).update(
-        #       twiml='<Response><Dial><Queue>support</Queue></Dial></Response>'
-        #   )
-        #   The Twilio Call SID is available in the SIP participant's attributes
-        #   (sip.callID) once the room is connected. Wire it via on_enter if needed.
+
+        if not self._twilio_call_sid:
+            logger.warning("transfer_to_agent called but no Twilio Call SID available")
+            return (
+                "Transfer could not be initiated — no active call SID found. "
+                "Offer to schedule a callback instead."
+            )
+
+        call_sid = self._twilio_call_sid
+        room_name = self._room_name
+        caller_phone = self._caller_phone
+
+        # Write the transfer intent to Redis.
+        # When the SIP participant is removed below, LiveKit sends a SIP BYE to
+        # Twilio. Twilio treats this as the called party hanging up, which fires
+        # the <Dial> action URL (/telephony/status). That endpoint reads this key
+        # and returns TwiML that bridges the caller to the human agent line.
+        try:
+            redis = await aioredis.from_url(settings.redis_url, decode_responses=True)
+            await redis.set(f"transfer:{call_sid}", settings.transfer_phone_number, ex=300)
+            await redis.aclose()
+        except Exception:
+            logger.warning(
+                "Could not write transfer key to Redis | call_sid=%s", call_sid
+            )
+
+        # After the farewell TTS plays (~8 s), remove the SIP participant from the
+        # LiveKit room. This sends a SIP BYE to Twilio, which ends the <Dial> and
+        # triggers the action URL — the correct path to bridge the caller.
+        async def _remove_sip_for_transfer() -> None:
+            await asyncio.sleep(8)
+            try:
+                async with lk_api.LiveKitAPI(
+                    url=settings.livekit_url,
+                    api_key=settings.livekit_api_key,
+                    api_secret=settings.livekit_api_secret,
+                ) as lk:
+                    await lk.room.remove_participant(
+                        lk_api.RoomParticipantIdentity(
+                            room=room_name,
+                            identity=f"sip_{caller_phone}",
+                        )
+                    )
+                logger.info(
+                    "SIP participant removed for transfer | phone=%s room=%s",
+                    caller_phone,
+                    room_name,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to remove SIP participant | phone=%s error=%r",
+                    caller_phone,
+                    exc,
+                )
+
+        asyncio.ensure_future(_remove_sip_for_transfer())
+
         return (
             f"Transfer to a live specialist has been initiated. Reason: {reason}. "
             "Say to the caller: 'I'm connecting you with a specialist right now — "
-            "please hold for just a moment. Thank you for your patience.'"
+            "please hold for just a moment. Thank you for your patience.' "
+            "Then say goodbye and wish them well. Do not say anything further after that."
         )
 
     @function_tool
@@ -893,9 +969,10 @@ async def hvac_agent(ctx: JobContext) -> None:
     # For regular WebRTC participants (e.g. playground testing), use BVC.
     # ------------------------------------------------------------------
 
+    agent = HVACAssistant(direction=direction, caller_phone=caller_phone, room_name=ctx.room.name)
     await session.start(
         room=ctx.room,
-        agent=HVACAssistant(direction=direction, caller_phone=caller_phone, room_name=ctx.room.name),
+        agent=agent,
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
                 noise_cancellation=lambda params: (
@@ -908,6 +985,8 @@ async def hvac_agent(ctx: JobContext) -> None:
         ),
     )
 
+    # Give the agent a direct reference to close the session for transfers.
+    agent._session_ref = session
     logger.info("Agent session running | room=%s direction=%s", ctx.room.name, direction)
 
     # Keep the coroutine alive until the room closes (call ends or caller hangs up).
