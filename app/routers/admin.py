@@ -7,18 +7,23 @@ internal operations: launching outbound campaigns, querying call records,
 and managing the outbound queue.
 """
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, status
+from openai import AsyncOpenAI
+from pinecone import Pinecone
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.core.security import verify_admin_api_key
 from app.dependencies import get_db, get_redis
+from app.rag.ingestor import delete_document, ingest_document
 from app.services import call as call_service
 from app.services import campaign as campaign_service
 
@@ -257,3 +262,228 @@ async def list_queue(
     return QueueListResponse(
         total=total, entries=[_queue_to_entry(e) for e in entries]
     )
+
+
+# ---------------------------------------------------------------------------
+# Knowledge base document ingestion
+# ---------------------------------------------------------------------------
+
+_VALID_NAMESPACES = {
+    "unit-specs",
+    "warranty-policy-details",
+    "error-codes",
+    "common-troubleshooting",
+}
+
+
+class IngestResponse(BaseModel):
+    doc_id: str
+    filename: str
+    namespace: str
+    chunks_ingested: int
+    characters_total: int
+
+
+class DeleteDocumentResponse(BaseModel):
+    doc_id: str
+    namespace: str
+    vectors_deleted: int
+
+
+@router.post("/documents/ingest", response_model=IngestResponse, status_code=status.HTTP_201_CREATED)
+async def ingest_document_endpoint(
+    file: UploadFile,
+    namespace: Annotated[
+        str,
+        Query(description="Target Pinecone namespace: unit-specs | warranty-policy-details | error-codes | common-troubleshooting"),
+    ],
+):
+    """
+    Upload a document (.txt .md .pdf .docx), chunk it, embed it, and upsert
+    it into the specified Pinecone namespace.
+
+    Re-uploading the same filename overwrites its existing vectors (upsert
+    semantics keyed on sha256(filename)).
+    """
+    if namespace not in _VALID_NAMESPACES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid namespace '{namespace}'. Valid values: {sorted(_VALID_NAMESPACES)}",
+        )
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty.")
+
+    filename = file.filename or "upload"
+
+    try:
+        result = await ingest_document(content=content, filename=filename, namespace=namespace)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+
+    logger.info(
+        "Document ingested via API | doc_id=%s file=%s ns=%s chunks=%d",
+        result.doc_id,
+        filename,
+        namespace,
+        result.chunks_ingested,
+    )
+    return IngestResponse(
+        doc_id=result.doc_id,
+        filename=result.filename,
+        namespace=result.namespace,
+        chunks_ingested=result.chunks_ingested,
+        characters_total=result.characters_total,
+    )
+
+
+@router.delete("/documents/{doc_id}", response_model=DeleteDocumentResponse)
+async def delete_document_endpoint(
+    doc_id: str,
+    namespace: Annotated[
+        str,
+        Query(description="Pinecone namespace to delete from"),
+    ],
+):
+    """
+    Delete all vectors for a document from a Pinecone namespace.
+
+    doc_id is the 12-character identifier returned by the ingest endpoint.
+    """
+    if namespace not in _VALID_NAMESPACES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid namespace '{namespace}'. Valid values: {sorted(_VALID_NAMESPACES)}",
+        )
+
+    deleted = await delete_document(doc_id=doc_id, namespace=namespace)
+    if deleted == 0:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No vectors found for doc_id='{doc_id}' in namespace='{namespace}'.",
+        )
+
+    return DeleteDocumentResponse(doc_id=doc_id, namespace=namespace, vectors_deleted=deleted)
+
+
+# ---------------------------------------------------------------------------
+# Knowledge base browser
+# ---------------------------------------------------------------------------
+
+
+class NamespaceInfo(BaseModel):
+    name: str
+    vector_count: int
+
+
+class NamespacesResponse(BaseModel):
+    namespaces: list[NamespaceInfo]
+
+
+class KnowledgeRecord(BaseModel):
+    id: str
+    content: str
+    metadata: dict
+
+
+class KnowledgeRecordsResponse(BaseModel):
+    namespace: str
+    total: int
+    records: list[KnowledgeRecord]
+
+
+def _get_pinecone_index():
+    # settings already imported
+    pc = Pinecone(api_key=settings.pinecone_api_key)
+    return pc.Index(settings.pinecone_index_name)
+
+
+@router.get("/knowledge/namespaces", response_model=NamespacesResponse)
+async def list_knowledge_namespaces():
+    """Return all Pinecone namespaces with their vector counts."""
+    loop = asyncio.get_event_loop()
+    index = _get_pinecone_index()
+    stats = await loop.run_in_executor(None, index.describe_index_stats)
+    namespaces = [
+        NamespaceInfo(name=ns, vector_count=data.vector_count)
+        for ns, data in sorted(stats.namespaces.items())
+    ]
+    return NamespacesResponse(namespaces=namespaces)
+
+
+@router.get("/knowledge/records", response_model=KnowledgeRecordsResponse)
+async def list_knowledge_records(
+    namespace: Annotated[str, Query(description="Pinecone namespace to browse")],
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    search: Annotated[str | None, Query(description="Semantic search query")] = None,
+):
+    """
+    Browse or search records in a Pinecone namespace.
+
+    Without `search`, returns up to `limit` records using a zero vector (arbitrary order).
+    With `search`, embeds the query and returns the top `limit` semantically matching records.
+    """
+    if namespace not in _VALID_NAMESPACES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid namespace '{namespace}'. Valid values: {sorted(_VALID_NAMESPACES)}",
+        )
+
+    loop = asyncio.get_event_loop()
+    index = _get_pinecone_index()
+
+    def _stats():
+        return index.describe_index_stats()
+
+    stats = await loop.run_in_executor(None, _stats)
+    total = stats.namespaces[namespace].vector_count if namespace in stats.namespaces else 0
+
+    if search:
+        # Semantic search: embed the query then query Pinecone
+        client = AsyncOpenAI(api_key=settings.openai_api_key)
+        response = await client.embeddings.create(
+            input=search,
+            model="text-embedding-3-small",
+            dimensions=1536,
+        )
+        query_vector = response.data[0].embedding
+
+        def _query():
+            return index.query(
+                vector=query_vector,
+                top_k=limit,
+                namespace=namespace,
+                include_metadata=True,
+            )
+
+        results = await loop.run_in_executor(None, _query)
+        matches = results.matches
+    else:
+        # Browse: list IDs then fetch metadata (zero-vector cosine is undefined)
+        def _list_and_fetch():
+            ids = []
+            for id_batch in index.list(namespace=namespace):
+                ids.extend(id_batch)
+                if len(ids) >= limit:
+                    break
+            ids = ids[:limit]
+            if not ids:
+                return []
+            fetched = index.fetch(ids=ids, namespace=namespace)
+            return list(fetched.vectors.values())
+
+        matches = await loop.run_in_executor(None, _list_and_fetch)
+
+    records = [
+        KnowledgeRecord(
+            id=m.id,
+            content=m.metadata.get("content", ""),
+            metadata={k: v for k, v in m.metadata.items() if k != "content"},
+        )
+        for m in matches
+    ]
+
+    return KnowledgeRecordsResponse(namespace=namespace, total=total, records=records)

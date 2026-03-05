@@ -9,7 +9,7 @@ function getKey() {
   return key;
 }
 
-async function apiFetch(path, params = {}) {
+async function apiFetch(path, params = {}, method = 'GET', queryParams = {}) {
   const key = getKey();
   if (!key) return null;
 
@@ -17,8 +17,12 @@ async function apiFetch(path, params = {}) {
   Object.entries(params).forEach(([k, v]) => {
     if (v !== null && v !== undefined && v !== '') url.searchParams.set(k, v);
   });
+  Object.entries(queryParams).forEach(([k, v]) => {
+    if (v !== null && v !== undefined && v !== '') url.searchParams.set(k, v);
+  });
 
   const res = await fetch(url.toString(), {
+    method,
     headers: { 'X-Api-Key': key },
   });
 
@@ -28,7 +32,35 @@ async function apiFetch(path, params = {}) {
     return null;
   }
 
-  if (!res.ok) throw new Error(`API error ${res.status}`);
+  if (!res.ok) {
+    let detail = `API error ${res.status}`;
+    try { const body = await res.json(); detail = body.detail || detail; } catch {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+async function apiUpload(path, formData) {
+  const key = getKey();
+  if (!key) return null;
+
+  const res = await fetch(new URL(path, window.location.origin).toString(), {
+    method: 'POST',
+    headers: { 'X-Api-Key': key },
+    body: formData,
+  });
+
+  if (res.status === 403 || res.status === 401) {
+    sessionStorage.removeItem('adminKey');
+    window.location.href = '/dashboard/login.html';
+    return null;
+  }
+
+  if (!res.ok) {
+    let detail = `API error ${res.status}`;
+    try { const body = await res.json(); detail = body.detail || detail; } catch {}
+    throw new Error(detail);
+  }
   return res.json();
 }
 
@@ -41,6 +73,7 @@ function renderNav(active) {
     <span class="nav-brand">HVAC Admin</span>
     <a href="/dashboard/index.html" class="nav-link ${active === 'overview' ? 'active' : ''}">Overview</a>
     <a href="/dashboard/calls.html" class="nav-link ${active === 'calls' ? 'active' : ''}">Call Log</a>
+    <a href="/dashboard/knowledge.html" class="nav-link ${active === 'knowledge' ? 'active' : ''}">Knowledge Base</a>
     <span class="nav-spacer"></span>
     <button class="nav-logout" onclick="logout()">Sign out</button>
   `;

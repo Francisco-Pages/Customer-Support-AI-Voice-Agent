@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HVAC Admin — Knowledge Base</title>
+  <link rel="stylesheet" href="/dashboard/style.css" />
+</head>
+<body>
+  <script src="/dashboard/app.js"></script>
+  <script>
+    if (!getKey()) { /* redirected */ }
+    renderNav('knowledge');
+  </script>
+
+  <div class="page">
+    <div class="page-header">
+      <span class="page-title">Knowledge Base</span>
+      <span class="page-subtitle">Upload documents to the vector database</span>
+    </div>
+
+    <!-- Upload card -->
+    <div class="card" style="margin-bottom: 24px;">
+      <div class="card-header">
+        <span class="card-title">Ingest Document</span>
+      </div>
+      <div class="upload-body">
+
+        <!-- Drop zone -->
+        <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
+          <div class="drop-zone-icon">&#128196;</div>
+          <div class="drop-zone-text">Click or drag a file here</div>
+          <div class="drop-zone-hint">.txt &nbsp;·&nbsp; .md &nbsp;·&nbsp; .pdf &nbsp;·&nbsp; .docx</div>
+          <div class="drop-zone-filename" id="dropZoneFilename"></div>
+        </div>
+        <input type="file" id="fileInput" accept=".txt,.md,.pdf,.docx" style="display:none"
+               onchange="handleFileSelect(this.files[0])" />
+
+        <!-- Namespace + submit -->
+        <div class="upload-controls">
+          <div class="filter-group">
+            <label class="filter-label">Target Namespace</label>
+            <select id="namespaceSelect">
+              <option value="unit-specs">unit-specs — Product specifications</option>
+              <option value="warranty-policy-details">warranty-policy-details — Warranty terms</option>
+              <option value="error-codes" selected>error-codes — Error code reference</option>
+              <option value="common-troubleshooting">common-troubleshooting — Troubleshooting guides</option>
+            </select>
+          </div>
+          <button class="btn btn-primary" id="uploadBtn" onclick="uploadFile()" disabled>
+            Upload &amp; Ingest
+          </button>
+        </div>
+
+        <!-- Status -->
+        <div class="upload-status" id="uploadStatus" style="display:none"></div>
+
+      </div>
+    </div>
+
+    <!-- Delete card -->
+    <div class="card" style="margin-bottom: 24px;">
+      <div class="card-header">
+        <span class="card-title">Delete Document</span>
+      </div>
+      <div class="upload-body">
+        <p style="color:var(--muted);font-size:13px;margin-bottom:16px;">
+          Remove all vectors for a document using the <code>doc_id</code> returned after ingestion.
+        </p>
+        <div class="upload-controls">
+          <div class="filter-group">
+            <label class="filter-label">Doc ID</label>
+            <input type="text" id="deleteDocId" placeholder="e.g. a3f9c2d1e4b7" style="width:200px" />
+          </div>
+          <div class="filter-group">
+            <label class="filter-label">Namespace</label>
+            <select id="deleteNamespace">
+              <option value="unit-specs">unit-specs</option>
+              <option value="warranty-policy-details">warranty-policy-details</option>
+              <option value="error-codes" selected>error-codes</option>
+              <option value="common-troubleshooting">common-troubleshooting</option>
+            </select>
+          </div>
+          <button class="btn btn-danger" onclick="deleteDocument()">Delete</button>
+        </div>
+        <div class="upload-status" id="deleteStatus" style="display:none"></div>
+      </div>
+    </div>
+
+    <!-- Session history -->
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Ingestion History</span>
+        <span style="margin-left:auto;color:var(--muted);font-size:12px;">This session only</span>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Filename</th>
+            <th>Namespace</th>
+            <th>Doc ID</th>
+            <th>Chunks</th>
+            <th>Characters</th>
+            <th>Ingested at</th>
+          </tr>
+        </thead>
+        <tbody id="historyBody">
+          <tr class="empty-row"><td colspan="6">No documents ingested this session.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Browse Namespace -->
+    <div class="card" style="margin-top: 24px;">
+      <div class="card-header">
+        <span class="card-title">Browse Namespace</span>
+        <button class="refresh-btn" onclick="loadNamespaces()">Refresh counts</button>
+      </div>
+
+      <!-- Namespace tabs -->
+      <div style="padding: 14px 20px 0; border-bottom: 1px solid var(--border); display: flex; gap: 8px; flex-wrap: wrap;" id="nsTabs"></div>
+
+      <!-- Search bar -->
+      <div style="padding: 12px 20px; border-bottom: 1px solid var(--border); background: #fafbff; display: flex; gap: 10px; align-items: center;">
+        <input type="text" id="browseSearch" placeholder="Semantic search…" style="flex:1; max-width:400px;"
+               onkeydown="if(event.key==='Enter') browseRecords()" />
+        <button class="btn btn-primary" onclick="browseRecords()">Search</button>
+        <button class="btn btn-ghost" onclick="document.getElementById('browseSearch').value=''; browseRecords()">Clear</button>
+        <span id="browseCount" style="margin-left:auto; color:var(--muted); font-size:12px;"></span>
+      </div>
+
+      <!-- Records table -->
+      <div style="overflow-x:auto;">
+        <table>
+          <thead id="browseHead"></thead>
+          <tbody id="browseBody">
+            <tr class="empty-row"><td colspan="4">Select a namespace to browse.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Record detail panel -->
+      <div class="panel-overlay" id="recordOverlay" onclick="closeRecord()"></div>
+      <div class="side-panel" id="recordPanel">
+        <div class="panel-header">
+          <span class="panel-title" id="recordPanelTitle">Record</span>
+          <button class="panel-close" onclick="closeRecord()">&#x2715;</button>
+        </div>
+        <div class="panel-body" id="recordPanelBody"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let selectedFile = null;
+    let sessionHistory = [];
+
+    /* ---- Drop zone ---- */
+
+    const dropZone = document.getElementById('dropZone');
+
+    dropZone.addEventListener('dragover', e => {
+      e.preventDefault();
+      dropZone.classList.add('drag-over');
+    });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+    dropZone.addEventListener('drop', e => {
+      e.preventDefault();
+      dropZone.classList.remove('drag-over');
+      const file = e.dataTransfer.files[0];
+      if (file) handleFileSelect(file);
+    });
+
+    function handleFileSelect(file) {
+      if (!file) return;
+      const allowed = ['txt', 'md', 'pdf', 'docx'];
+      const ext = file.name.split('.').pop().toLowerCase();
+      if (!allowed.includes(ext)) {
+        showStatus('uploadStatus', 'error', `Unsupported file type ".${ext}". Please upload .txt, .md, .pdf, or .docx.`);
+        return;
+      }
+      selectedFile = file;
+      document.getElementById('dropZoneFilename').textContent = file.name;
+      dropZone.classList.add('has-file');
+      document.getElementById('uploadBtn').disabled = false;
+      hideStatus('uploadStatus');
+    }
+
+    /* ---- Upload ---- */
+
+    async function uploadFile() {
+      if (!selectedFile) return;
+
+      const namespace = document.getElementById('namespaceSelect').value;
+      const btn = document.getElementById('uploadBtn');
+
+      btn.disabled = true;
+      btn.textContent = 'Uploading…';
+      showStatus('uploadStatus', 'info', 'Embedding and indexing — this may take a few seconds…');
+
+      try {
+        const formData = new FormData();
+        formData.append('file', selectedFile);
+
+        const data = await apiUpload(`/admin/documents/ingest?namespace=${encodeURIComponent(namespace)}`, formData);
+        if (!data) return;
+
+        showStatus('uploadStatus', 'success',
+          `Ingested <strong>${data.chunks_ingested} chunks</strong> from <strong>${data.filename}</strong> &nbsp;·&nbsp; doc_id: <code>${data.doc_id}</code>`);
+
+        // Add to history
+        sessionHistory.unshift({ ...data, ingested_at: new Date().toLocaleTimeString() });
+        renderHistory();
+
+        // Reset file selection
+        selectedFile = null;
+        document.getElementById('fileInput').value = '';
+        document.getElementById('dropZoneFilename').textContent = '';
+        dropZone.classList.remove('has-file');
+      } catch (err) {
+        showStatus('uploadStatus', 'error', `Upload failed: ${err.message}`);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Upload & Ingest';
+      }
+    }
+
+    /* ---- Delete ---- */
+
+    async function deleteDocument() {
+      const docId = document.getElementById('deleteDocId').value.trim();
+      const namespace = document.getElementById('deleteNamespace').value;
+
+      if (!docId) {
+        showStatus('deleteStatus', 'error', 'Please enter a doc_id.');
+        return;
+      }
+
+      showStatus('deleteStatus', 'info', 'Deleting vectors…');
+
+      try {
+        const data = await apiFetch(`/admin/documents/${encodeURIComponent(docId)}`, {}, 'DELETE',
+          { namespace });
+        if (!data) return;
+        showStatus('deleteStatus', 'success',
+          `Deleted <strong>${data.vectors_deleted} vectors</strong> for doc_id <code>${docId}</code> from <em>${namespace}</em>.`);
+        document.getElementById('deleteDocId').value = '';
+      } catch (err) {
+        showStatus('deleteStatus', 'error', `Delete failed: ${err.message}`);
+      }
+    }
+
+    /* ---- History table ---- */
+
+    function renderHistory() {
+      const tbody = document.getElementById('historyBody');
+      if (sessionHistory.length === 0) {
+        tbody.innerHTML = '<tr class="empty-row"><td colspan="6">No documents ingested this session.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = sessionHistory.map(r => `
+        <tr>
+          <td>${r.filename}</td>
+          <td><span class="badge badge-blue">${r.namespace}</span></td>
+          <td><code>${r.doc_id}</code></td>
+          <td>${r.chunks_ingested}</td>
+          <td>${r.characters_total.toLocaleString()}</td>
+          <td class="td-muted">${r.ingested_at}</td>
+        </tr>
+      `).join('');
+    }
+
+    /* ---- Status helpers ---- */
+
+    function showStatus(id, type, html) {
+      const el = document.getElementById(id);
+      el.className = `upload-status status-${type}`;
+      el.innerHTML = html;
+      el.style.display = 'block';
+    }
+
+    function hideStatus(id) {
+      document.getElementById(id).style.display = 'none';
+    }
+
+    /* ---- Browse namespace ---- */
+
+    let activeNamespace = null;
+    const NS_COLUMNS = {
+      'unit-specs':              ['Brand', 'Model Number', 'Unit Type', 'Refrigerant'],
+      'error-codes':             ['Error Code', 'Description'],
+      'warranty-policy-details': ['Section', 'Brand', 'Content'],
+      'common-troubleshooting':  ['Content'],
+    };
+
+    async function loadNamespaces() {
+      const data = await apiFetch('/admin/knowledge/namespaces');
+      if (!data) return;
+      const tabs = document.getElementById('nsTabs');
+      tabs.innerHTML = data.namespaces.map(ns => `
+        <button class="nav-link ${ns.name === activeNamespace ? 'active' : ''}"
+                onclick="selectNamespace('${ns.name}')"
+                style="margin-bottom:0; border-radius:6px 6px 0 0;">
+          ${ns.name}
+          <span style="margin-left:6px; font-size:11px; color:var(--muted);">${ns.vector_count.toLocaleString()}</span>
+        </button>
+      `).join('');
+      if (!activeNamespace && data.namespaces.length > 0) {
+        selectNamespace(data.namespaces[0].name);
+      }
+    }
+
+    function selectNamespace(ns) {
+      activeNamespace = ns;
+      document.getElementById('browseSearch').value = '';
+      loadNamespaces(); // re-render tabs with active state
+      browseRecords();
+    }
+
+    async function browseRecords() {
+      if (!activeNamespace) return;
+      const search = document.getElementById('browseSearch').value.trim();
+      const tbody = document.getElementById('browseBody');
+      tbody.innerHTML = '<tr class="loading-row"><td colspan="6">Loading…</td></tr>';
+
+      const params = { namespace: activeNamespace, limit: 50 };
+      if (search) params.search = search;
+
+      const data = await apiFetch('/admin/knowledge/records', params);
+      if (!data) return;
+
+      document.getElementById('browseCount').textContent =
+        search ? `${data.records.length} results` : `${data.total.toLocaleString()} total vectors`;
+
+      renderBrowseTable(data.records, activeNamespace);
+    }
+
+    function renderBrowseTable(records, ns) {
+      const thead = document.getElementById('browseHead');
+      const tbody = document.getElementById('browseBody');
+
+      if (records.length === 0) {
+        thead.innerHTML = '';
+        tbody.innerHTML = '<tr class="empty-row"><td colspan="4">No records found.</td></tr>';
+        return;
+      }
+
+      if (ns === 'unit-specs') {
+        thead.innerHTML = '<tr><th>Brand</th><th>Model Number</th><th>Unit Type</th><th>Refrigerant</th></tr>';
+        tbody.innerHTML = records.map(r => `
+          <tr onclick="openRecord(${JSON.stringify(JSON.stringify(r))})">
+            <td>${r.metadata.brand || '—'}</td>
+            <td><code>${r.metadata.model_number || '—'}</code></td>
+            <td>${r.metadata.unit_type || '—'}</td>
+            <td><span class="badge badge-blue">${r.metadata.refrigerant_type || '—'}</span></td>
+          </tr>`).join('');
+
+      } else if (ns === 'error-codes') {
+        thead.innerHTML = '<tr><th>Error Code</th><th>Description</th></tr>';
+        tbody.innerHTML = records.map(r => `
+          <tr onclick="openRecord(${JSON.stringify(JSON.stringify(r))})">
+            <td><code>${r.metadata.error_code || '—'}</code></td>
+            <td class="td-muted">${r.content.replace(/^Error Code: \S+ — /, '').substring(0, 120)}…</td>
+          </tr>`).join('');
+
+      } else if (ns === 'warranty-policy-details') {
+        thead.innerHTML = '<tr><th>Section</th><th>Brand</th><th>Content</th></tr>';
+        tbody.innerHTML = records.map(r => `
+          <tr onclick="openRecord(${JSON.stringify(JSON.stringify(r))})">
+            <td><span class="badge badge-gray">${r.metadata.section || '—'}</span></td>
+            <td>${r.metadata.brand || '—'}</td>
+            <td class="td-muted">${r.content.substring(0, 120)}…</td>
+          </tr>`).join('');
+
+      } else {
+        thead.innerHTML = '<tr><th>Content</th></tr>';
+        tbody.innerHTML = records.map(r => `
+          <tr onclick="openRecord(${JSON.stringify(JSON.stringify(r))})">
+            <td class="td-muted">${r.content.substring(0, 200)}…</td>
+          </tr>`).join('');
+      }
+    }
+
+    function openRecord(jsonStr) {
+      const r = JSON.parse(jsonStr);
+      document.getElementById('recordPanelTitle').textContent = r.metadata.model_number || r.metadata.error_code || 'Record';
+      let body = '';
+      for (const [k, v] of Object.entries(r.metadata)) {
+        body += `<div class="panel-section">
+          <div class="panel-section-title">${k}</div>
+          <div class="panel-section-body">${v}</div>
+        </div>`;
+      }
+      body += `<div class="panel-section">
+        <div class="panel-section-title">Content</div>
+        <div class="panel-section-body">${r.content}</div>
+      </div>`;
+      document.getElementById('recordPanelBody').innerHTML = body;
+      document.getElementById('recordOverlay').classList.add('open');
+      document.getElementById('recordPanel').classList.add('open');
+    }
+
+    function closeRecord() {
+      document.getElementById('recordOverlay').classList.remove('open');
+      document.getElementById('recordPanel').classList.remove('open');
+    }
+
+    loadNamespaces();
+  </script>
+</body>
+</html>
