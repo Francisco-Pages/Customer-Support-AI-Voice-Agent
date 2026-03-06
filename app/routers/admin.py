@@ -9,12 +9,16 @@ and managing the outbound queue.
 
 import asyncio
 import logging
+import math
+import uuid
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, status
+from geopy.adapters import AioHTTPAdapter
+from geopy.geocoders import Nominatim
 from openai import AsyncOpenAI
 from pinecone import Pinecone
 from pydantic import BaseModel, Field
@@ -487,3 +491,285 @@ async def list_knowledge_records(
     ]
 
     return KnowledgeRecordsResponse(namespace=namespace, total=total, records=records)
+
+
+# ---------------------------------------------------------------------------
+# Service directory (geo index — technicians & distributors)
+# ---------------------------------------------------------------------------
+
+
+def _xyz_to_latlon(x: float, y: float, z: float) -> tuple[float, float]:
+    """Reverse the unit-sphere projection back to (latitude, longitude) in degrees."""
+    lat = math.degrees(math.asin(max(-1.0, min(1.0, z))))
+    lon = math.degrees(math.atan2(y, x))
+    return round(lat, 6), round(lon, 6)
+
+
+class LocationRecord(BaseModel):
+    id: str
+    record_type: str
+    name: str
+    phone: str
+    address: str
+    lat: float | None = None
+    lon: float | None = None
+
+
+class LocationsListResponse(BaseModel):
+    record_type: str
+    total: int
+    records: list[LocationRecord]
+
+
+class AddLocationRequest(BaseModel):
+    record_type: str = Field(..., pattern="^(technician|distributor)$")
+    name: str = Field(..., min_length=1)
+    phone: str = Field(..., min_length=1)
+    address: str = Field(..., min_length=1, description="Full address e.g. '123 Main St, Austin, TX'")
+
+
+class AddLocationResponse(BaseModel):
+    id: str
+    record_type: str
+    name: str
+    phone: str
+    address: str
+    lat: float | None = None
+    lon: float | None = None
+
+
+class UpdateLocationRequest(BaseModel):
+    name: str = Field(..., min_length=1)
+    phone: str = Field(..., min_length=1)
+    address: str = Field(..., min_length=1, description="Full address e.g. '123 Main St, Austin, TX'")
+
+
+class DeleteLocationResponse(BaseModel):
+    id: str
+    record_type: str
+
+
+def _get_geo_index():
+    pc = Pinecone(api_key=settings.pinecone_api_key)
+    return pc.Index(settings.pinecone_geo_index_name)
+
+
+@router.get("/locations", response_model=LocationsListResponse)
+async def list_locations(
+    record_type: Annotated[str, Query(pattern="^(technician|distributor)$")] = "technician",
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+):
+    """List all technicians or distributors from the Pinecone geo index."""
+    namespace = "technicians" if record_type == "technician" else "distributors"
+    name_field = "technician_name" if record_type == "technician" else "distributor_name"
+    loop = asyncio.get_event_loop()
+    index = _get_geo_index()
+
+    def _list_and_fetch():
+        stats = index.describe_index_stats()
+        total = 0
+        if namespace in stats.namespaces:
+            total = stats.namespaces[namespace].vector_count
+
+        ids = []
+        for id_batch in index.list(namespace=namespace):
+            ids.extend(id_batch)
+            if len(ids) >= limit:
+                break
+        ids = ids[:limit]
+        if not ids:
+            return total, []
+
+        fetched = index.fetch(ids=ids, namespace=namespace)
+        records = []
+        for vec_id, vec in fetched.vectors.items():
+            meta = vec.metadata or {}
+            lat, lon = None, None
+            if vec.values and len(vec.values) == 3:
+                lat, lon = _xyz_to_latlon(*vec.values)
+            records.append({
+                "id": vec_id,
+                "name": meta.get(name_field, "Unknown"),
+                "phone": meta.get("phone_number", "N/A"),
+                "address": meta.get("address", ""),
+                "lat": lat,
+                "lon": lon,
+            })
+        return total, records
+
+    total, raw = await loop.run_in_executor(None, _list_and_fetch)
+    records = [
+        LocationRecord(id=r["id"], record_type=record_type, name=r["name"],
+                       phone=r["phone"], address=r["address"], lat=r["lat"], lon=r["lon"])
+        for r in raw
+    ]
+    return LocationsListResponse(record_type=record_type, total=total, records=records)
+
+
+@router.post("/locations", response_model=AddLocationResponse, status_code=status.HTTP_201_CREATED)
+async def add_location(payload: AddLocationRequest):
+    """
+    Geocode the provided address, compute a unit-sphere vector, and upsert
+    the record into the Pinecone geo index under the appropriate namespace.
+    """
+    try:
+        async with Nominatim(
+            user_agent="HVACVoiceAgent/1.0", adapter_factory=AioHTTPAdapter
+        ) as geolocator:
+            location = await geolocator.geocode(payload.address + ", USA")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Geocoding request failed: {exc}",
+        )
+
+    if not location:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Could not geocode address: {payload.address!r}. Try a more specific address.",
+        )
+
+    phi = math.radians(location.latitude)
+    lam = math.radians(location.longitude)
+    vector = [
+        math.cos(phi) * math.cos(lam),
+        math.cos(phi) * math.sin(lam),
+        math.sin(phi),
+    ]
+
+    namespace = "technicians" if payload.record_type == "technician" else "distributors"
+    name_field = "technician_name" if payload.record_type == "technician" else "distributor_name"
+    record_id = str(uuid.uuid4())
+    metadata = {
+        name_field: payload.name,
+        "phone_number": payload.phone,
+        "address": payload.address,
+    }
+
+    loop = asyncio.get_event_loop()
+    index = _get_geo_index()
+
+    def _upsert():
+        index.upsert(
+            vectors=[{"id": record_id, "values": vector, "metadata": metadata}],
+            namespace=namespace,
+        )
+
+    await loop.run_in_executor(None, _upsert)
+    lat, lon = _xyz_to_latlon(*vector)
+    logger.info(
+        "Location added | type=%s name=%s id=%s lat=%.4f lon=%.4f",
+        payload.record_type, payload.name, record_id, lat, lon,
+    )
+    return AddLocationResponse(
+        id=record_id,
+        record_type=payload.record_type,
+        name=payload.name,
+        phone=payload.phone,
+        address=payload.address,
+        lat=lat,
+        lon=lon,
+    )
+
+
+@router.put("/locations/{record_id}", response_model=AddLocationResponse)
+async def update_location(
+    record_id: str,
+    payload: UpdateLocationRequest,
+    record_type: Annotated[str, Query(pattern="^(technician|distributor)$")] = "technician",
+):
+    """
+    Update a technician or distributor record.
+
+    Fetches the existing vector first. Re-geocodes only when the address has
+    actually changed; otherwise reuses the stored vector so name/phone-only
+    edits never trigger a geocoding call.
+    """
+    namespace = "technicians" if record_type == "technician" else "distributors"
+    name_field = "technician_name" if record_type == "technician" else "distributor_name"
+    loop = asyncio.get_event_loop()
+    index = _get_geo_index()
+
+    # Fetch existing vector to compare address and reuse coordinates if unchanged.
+    def _fetch():
+        result = index.fetch(ids=[record_id], namespace=namespace)
+        return result.vectors.get(record_id)
+
+    existing = await loop.run_in_executor(None, _fetch)
+    existing_address = (existing.metadata or {}).get("address", "") if existing else None
+    existing_vector = existing.values if existing else None
+
+    if payload.address != existing_address or existing_vector is None:
+        # Address changed (or record not found) — re-geocode.
+        try:
+            async with Nominatim(
+                user_agent="HVACVoiceAgent/1.0", adapter_factory=AioHTTPAdapter
+            ) as geolocator:
+                location = await geolocator.geocode(payload.address + ", USA")
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Geocoding request failed: {exc}",
+            )
+
+        if not location:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Could not geocode address: {payload.address!r}. Try a more specific address.",
+            )
+
+        phi = math.radians(location.latitude)
+        lam = math.radians(location.longitude)
+        vector = [
+            math.cos(phi) * math.cos(lam),
+            math.cos(phi) * math.sin(lam),
+            math.sin(phi),
+        ]
+    else:
+        vector = existing_vector
+
+    metadata = {
+        name_field: payload.name,
+        "phone_number": payload.phone,
+        "address": payload.address,
+    }
+
+    def _upsert():
+        index.upsert(
+            vectors=[{"id": record_id, "values": vector, "metadata": metadata}],
+            namespace=namespace,
+        )
+
+    await loop.run_in_executor(None, _upsert)
+    lat, lon = _xyz_to_latlon(*vector)
+    logger.info(
+        "Location updated | type=%s name=%s id=%s lat=%.4f lon=%.4f",
+        record_type, payload.name, record_id, lat, lon,
+    )
+    return AddLocationResponse(
+        id=record_id,
+        record_type=record_type,
+        name=payload.name,
+        phone=payload.phone,
+        address=payload.address,
+        lat=lat,
+        lon=lon,
+    )
+
+
+@router.delete("/locations/{record_id}", response_model=DeleteLocationResponse)
+async def delete_location(
+    record_id: str,
+    record_type: Annotated[str, Query(pattern="^(technician|distributor)$")] = "technician",
+):
+    """Delete a technician or distributor record from the Pinecone geo index by vector ID."""
+    namespace = "technicians" if record_type == "technician" else "distributors"
+    loop = asyncio.get_event_loop()
+    index = _get_geo_index()
+
+    def _delete():
+        index.delete(ids=[record_id], namespace=namespace)
+
+    await loop.run_in_executor(None, _delete)
+    logger.info("Location deleted | type=%s id=%s", record_type, record_id)
+    return DeleteLocationResponse(id=record_id, record_type=record_type)

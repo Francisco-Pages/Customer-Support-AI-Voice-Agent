@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HVAC Admin — Service Directory</title>
+  <link rel="stylesheet" href="/dashboard/style.css" />
+</head>
+<body>
+  <script src="/dashboard/app.js"></script>
+  <script>
+    if (!getKey()) { /* redirected */ }
+    renderNav('locations');
+  </script>
+
+  <div class="page">
+    <div class="page-header">
+      <span class="page-title">Service Directory</span>
+      <span class="page-subtitle">Technicians and distributors in the geo index</span>
+    </div>
+
+    <!-- Stat cards -->
+    <div class="stats-grid" style="grid-template-columns: repeat(2, minmax(210px, 1fr)); max-width: 460px; margin-bottom: 28px;">
+      <div class="stat-card">
+        <div class="stat-label">Technicians</div>
+        <div class="stat-value" id="statTech">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Distributors</div>
+        <div class="stat-value" id="statDist">—</div>
+      </div>
+    </div>
+
+    <!-- Add record -->
+    <div class="card" style="margin-bottom: 24px;">
+      <div class="card-header">
+        <span class="card-title">Add Record</span>
+      </div>
+      <div style="padding: 20px;">
+        <div class="filter-bar" style="background: none; border: none; padding: 0; margin-bottom: 0; flex-wrap: wrap; gap: 12px; align-items: flex-end;">
+          <div class="filter-group">
+            <label class="filter-label">Type</label>
+            <select id="addType">
+              <option value="technician">Technician</option>
+              <option value="distributor">Distributor</option>
+            </select>
+          </div>
+          <div class="filter-group">
+            <label class="filter-label">Name</label>
+            <input type="text" id="addName" placeholder="Company or person name" style="width: 220px;" />
+          </div>
+          <div class="filter-group">
+            <label class="filter-label">Phone</label>
+            <input type="text" id="addPhone" placeholder="+1-555-000-0000" style="width: 160px;" />
+          </div>
+          <div class="filter-group">
+            <label class="filter-label">Address</label>
+            <input type="text" id="addAddress" placeholder="123 Main St, Austin, TX" style="width: 300px;" />
+          </div>
+          <button class="btn btn-primary" style="margin-top: 18px;" onclick="addRecord()">Add</button>
+        </div>
+        <div class="upload-status" id="addStatus" style="display:none; margin-top: 14px;"></div>
+      </div>
+    </div>
+
+    <!-- Records table -->
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Records</span>
+        <div style="display: flex; gap: 6px; margin-left: 16px;">
+          <button class="nav-link active" id="tabTech" onclick="switchTab('technician')">Technicians</button>
+          <button class="nav-link" id="tabDist" onclick="switchTab('distributor')">Distributors</button>
+        </div>
+        <button class="refresh-btn" onclick="loadRecords()">↻ Refresh</button>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Phone</th>
+            <th>Address</th>
+            <th>Coordinates</th>
+            <th style="width: 140px;"></th>
+          </tr>
+        </thead>
+        <tbody id="recordsBody">
+          <tr class="loading-row"><td colspan="5">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Edit modal -->
+  <div class="modal-overlay" id="editModal" onclick="closeEditModal()">
+    <div class="modal" onclick="event.stopPropagation()" style="max-width: 520px;">
+      <div class="modal-header">
+        <span class="modal-title">Edit Record</span>
+        <button class="modal-close" onclick="closeEditModal()">&#x2715;</button>
+      </div>
+      <div class="modal-body">
+        <div style="display: flex; flex-direction: column; gap: 14px; margin-bottom: 20px;">
+          <div class="filter-group">
+            <label class="filter-label">Name</label>
+            <input type="text" id="editName" style="width: 100%;" />
+          </div>
+          <div class="filter-group">
+            <label class="filter-label">Phone</label>
+            <input type="text" id="editPhone" style="width: 100%;" />
+          </div>
+          <div class="filter-group">
+            <label class="filter-label">Address</label>
+            <input type="text" id="editAddress" style="width: 100%;" />
+            <span style="font-size: 11px; color: var(--muted); margin-top: 4px;">
+              Changing the address re-geocodes the location in the search index.
+            </span>
+          </div>
+          <div class="filter-group">
+            <label class="filter-label">Coordinates (geocoded)</label>
+            <span id="editCoords" style="font-family: monospace; font-size: 13px; color: var(--muted); padding: 6px 0;">—</span>
+          </div>
+        </div>
+        <div style="display: flex; gap: 10px; justify-content: flex-end;">
+          <button class="btn btn-ghost" onclick="closeEditModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="confirmEdit()">Save changes</button>
+        </div>
+        <div class="upload-status" id="editStatus" style="display:none; margin-top: 14px;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Confirm delete modal -->
+  <div class="modal-overlay" id="deleteModal" onclick="closeDeleteModal()">
+    <div class="modal" onclick="event.stopPropagation()" style="max-width: 440px;">
+      <div class="modal-header">
+        <span class="modal-title">Delete Record</span>
+        <button class="modal-close" onclick="closeDeleteModal()">&#x2715;</button>
+      </div>
+      <div class="modal-body">
+        <p style="margin-bottom: 20px; color: var(--muted); font-size: 13px; line-height: 1.6;">
+          Remove <strong id="deleteRecordName" style="color: var(--text);"></strong> from the geo index?
+          This cannot be undone — the agent will no longer return this record for nearby searches.
+        </p>
+        <div style="display: flex; gap: 10px; justify-content: flex-end;">
+          <button class="btn btn-ghost" onclick="closeDeleteModal()">Cancel</button>
+          <button class="btn btn-danger" onclick="confirmDelete()">Delete</button>
+        </div>
+        <div class="upload-status" id="deleteStatus" style="display:none; margin-top: 14px;"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let activeTab = 'technician';
+    let pendingDelete = null;
+    let pendingEdit = null;
+
+    function showStatus(id, type, html) {
+      const el = document.getElementById(id);
+      el.className = `upload-status status-${type}`;
+      el.innerHTML = html;
+      el.style.display = 'block';
+    }
+
+    function hideStatus(id) {
+      document.getElementById(id).style.display = 'none';
+    }
+
+    function escHtml(str) {
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function escAttr(str) {
+      return String(str).replace(/'/g, '&#39;').replace(/"/g, '&quot;');
+    }
+
+    function fmtCoords(lat, lon) {
+      if (lat == null || lon == null) return '<span style="color:var(--muted)">—</span>';
+      return `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+    }
+
+    /* ---- Counts ---- */
+
+    async function loadCounts() {
+      try {
+        const [tech, dist] = await Promise.all([
+          apiFetch('/admin/locations', { record_type: 'technician', limit: 1 }),
+          apiFetch('/admin/locations', { record_type: 'distributor', limit: 1 }),
+        ]);
+        if (tech) document.getElementById('statTech').textContent = tech.total.toLocaleString();
+        if (dist) document.getElementById('statDist').textContent = dist.total.toLocaleString();
+      } catch (err) {
+        console.error('Failed to load counts', err);
+      }
+    }
+
+    /* ---- Tab switch ---- */
+
+    function switchTab(type) {
+      activeTab = type;
+      document.getElementById('tabTech').className = 'nav-link' + (type === 'technician' ? ' active' : '');
+      document.getElementById('tabDist').className = 'nav-link' + (type === 'distributor' ? ' active' : '');
+      loadRecords();
+    }
+
+    /* ---- Records list ---- */
+
+    async function loadRecords() {
+      const tbody = document.getElementById('recordsBody');
+      tbody.innerHTML = '<tr class="loading-row"><td colspan="5">Loading…</td></tr>';
+      try {
+        const data = await apiFetch('/admin/locations', { record_type: activeTab, limit: 100 });
+        if (!data) return;
+        if (data.records.length === 0) {
+          tbody.innerHTML = `<tr class="empty-row"><td colspan="5">No ${activeTab}s found. Add one above.</td></tr>`;
+          return;
+        }
+        tbody.innerHTML = data.records.map(r => `
+          <tr>
+            <td>${escHtml(r.name)}</td>
+            <td class="td-muted">${escHtml(r.phone)}</td>
+            <td class="td-muted">${escHtml(r.address)}</td>
+            <td class="td-muted" style="font-family: monospace; font-size: 12px; white-space: nowrap;">
+              ${fmtCoords(r.lat, r.lon)}
+            </td>
+            <td style="white-space: nowrap;">
+              <button class="btn btn-ghost" style="padding: 4px 10px; font-size: 12px; margin-right: 4px;"
+                      onclick="openEditModal('${escAttr(r.id)}', '${escAttr(r.name)}', '${escAttr(r.phone)}', '${escAttr(r.address)}', '${activeTab}', ${r.lat ?? 'null'}, ${r.lon ?? 'null'})">
+                Edit
+              </button>
+              <button class="btn btn-danger" style="padding: 4px 10px; font-size: 12px;"
+                      onclick="openDeleteModal('${escAttr(r.id)}', '${escAttr(r.name)}', '${activeTab}')">
+                Delete
+              </button>
+            </td>
+          </tr>
+        `).join('');
+      } catch (err) {
+        tbody.innerHTML = `<tr class="empty-row"><td colspan="5">Error: ${escHtml(err.message)}</td></tr>`;
+      }
+    }
+
+    /* ---- Add record ---- */
+
+    async function addRecord() {
+      const type    = document.getElementById('addType').value;
+      const name    = document.getElementById('addName').value.trim();
+      const phone   = document.getElementById('addPhone').value.trim();
+      const address = document.getElementById('addAddress').value.trim();
+
+      if (!name || !phone || !address) {
+        showStatus('addStatus', 'error', 'All fields are required.');
+        return;
+      }
+
+      showStatus('addStatus', 'info', 'Geocoding address and adding to index…');
+
+      try {
+        const result = await apiJson('/admin/locations', { record_type: type, name, phone, address });
+        if (!result) return;
+        const coordStr = (result.lat != null && result.lon != null)
+          ? ` &nbsp;·&nbsp; ${result.lat.toFixed(4)}, ${result.lon.toFixed(4)}` : '';
+        showStatus('addStatus', 'success',
+          `Added <strong>${escHtml(result.name)}</strong> to ${result.record_type}s${coordStr} &nbsp;·&nbsp; id: <code>${result.id}</code>`);
+        document.getElementById('addName').value = '';
+        document.getElementById('addPhone').value = '';
+        document.getElementById('addAddress').value = '';
+        if (activeTab === type) loadRecords();
+        loadCounts();
+      } catch (err) {
+        showStatus('addStatus', 'error', `Failed: ${escHtml(err.message)}`);
+      }
+    }
+
+    /* ---- Edit ---- */
+
+    function openEditModal(id, name, phone, address, type, lat, lon) {
+      pendingEdit = { id, type };
+      document.getElementById('editName').value = name;
+      document.getElementById('editPhone').value = phone;
+      document.getElementById('editAddress').value = address;
+      document.getElementById('editCoords').textContent = fmtCoords(lat, lon).replace(/<[^>]+>/g, '—');
+      // store raw values so we can display them without HTML
+      document.getElementById('editCoords').textContent =
+        (lat != null && lon != null) ? `${lat.toFixed(6)}, ${lon.toFixed(6)}` : '—';
+      hideStatus('editStatus');
+      document.getElementById('editModal').classList.add('open');
+    }
+
+    function closeEditModal() {
+      pendingEdit = null;
+      document.getElementById('editModal').classList.remove('open');
+    }
+
+    async function confirmEdit() {
+      if (!pendingEdit) return;
+      const name    = document.getElementById('editName').value.trim();
+      const phone   = document.getElementById('editPhone').value.trim();
+      const address = document.getElementById('editAddress').value.trim();
+
+      if (!name || !phone || !address) {
+        showStatus('editStatus', 'error', 'All fields are required.');
+        return;
+      }
+
+      showStatus('editStatus', 'info', 'Geocoding address and saving…');
+
+      try {
+        const url = `/admin/locations/${encodeURIComponent(pendingEdit.id)}?record_type=${pendingEdit.type}`;
+        const result = await apiJson(url, { name, phone, address }, 'PUT');
+        if (!result) return;
+        // Show the resolved coordinates before closing
+        if (result.lat != null && result.lon != null) {
+          document.getElementById('editCoords').textContent =
+            `${result.lat.toFixed(6)}, ${result.lon.toFixed(6)}`;
+        }
+        closeEditModal();
+        loadRecords();
+      } catch (err) {
+        showStatus('editStatus', 'error', `Save failed: ${escHtml(err.message)}`);
+      }
+    }
+
+    /* ---- Delete ---- */
+
+    function openDeleteModal(id, name, type) {
+      pendingDelete = { id, type };
+      document.getElementById('deleteRecordName').textContent = name;
+      hideStatus('deleteStatus');
+      document.getElementById('deleteModal').classList.add('open');
+    }
+
+    function closeDeleteModal() {
+      pendingDelete = null;
+      document.getElementById('deleteModal').classList.remove('open');
+    }
+
+    async function confirmDelete() {
+      if (!pendingDelete) return;
+      showStatus('deleteStatus', 'info', 'Deleting…');
+      try {
+        const url = `/admin/locations/${encodeURIComponent(pendingDelete.id)}?record_type=${pendingDelete.type}`;
+        await apiFetch(url, {}, 'DELETE');
+        closeDeleteModal();
+        loadRecords();
+        loadCounts();
+      } catch (err) {
+        showStatus('deleteStatus', 'error', `Delete failed: ${escHtml(err.message)}`);
+      }
+    }
+
+    loadCounts();
+    loadRecords();
+  </script>
+</body>
+</html>

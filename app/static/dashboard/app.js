@@ -40,6 +40,30 @@ async function apiFetch(path, params = {}, method = 'GET', queryParams = {}) {
   return res.json();
 }
 
+async function apiJson(path, body, method = 'POST') {
+  const key = getKey();
+  if (!key) return null;
+
+  const res = await fetch(new URL(path, window.location.origin).toString(), {
+    method,
+    headers: { 'X-Api-Key': key, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  if (res.status === 403 || res.status === 401) {
+    sessionStorage.removeItem('adminKey');
+    window.location.href = '/dashboard/login.html';
+    return null;
+  }
+
+  if (!res.ok) {
+    let detail = `API error ${res.status}`;
+    try { const b = await res.json(); detail = b.detail || detail; } catch {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
 async function apiUpload(path, formData) {
   const key = getKey();
   if (!key) return null;
@@ -74,6 +98,7 @@ function renderNav(active) {
     <a href="/dashboard/index.html" class="nav-link ${active === 'overview' ? 'active' : ''}">Overview</a>
     <a href="/dashboard/calls.html" class="nav-link ${active === 'calls' ? 'active' : ''}">Call Log</a>
     <a href="/dashboard/knowledge.html" class="nav-link ${active === 'knowledge' ? 'active' : ''}">Knowledge Base</a>
+    <a href="/dashboard/locations.html" class="nav-link ${active === 'locations' ? 'active' : ''}">Service Directory</a>
     <span class="nav-spacer"></span>
     <button class="nav-logout" onclick="logout()">Sign out</button>
   `;
