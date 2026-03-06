@@ -32,6 +32,9 @@ from livekit.agents import (
     AgentServer,
     AgentSession,
     Agent,
+    AudioConfig,
+    BackgroundAudioPlayer,
+    BuiltinAudioClip,
     ChatContext,
     ChatMessage,
     JobContext,
@@ -1004,6 +1007,17 @@ async def hvac_agent(ctx: JobContext) -> None:
             ),
         ),
     )
+
+    # Play keyboard-typing sounds while the agent is in the "thinking" state
+    # (during RAG retrieval + LLM generation). Two clips alternate randomly to
+    # avoid repetition. No ambient sound — telephony callers find it distracting.
+    background_audio = BackgroundAudioPlayer(
+        thinking_sound=[
+            AudioConfig(BuiltinAudioClip.KEYBOARD_TYPING, volume=0.6),
+            AudioConfig(BuiltinAudioClip.KEYBOARD_TYPING2, volume=0.5),
+        ],
+    )
+    await background_audio.start(room=ctx.room, agent_session=session)
 
     # Give the agent a direct reference to close the session for transfers.
     agent._session_ref = session
