@@ -1,13 +1,20 @@
 """
-RAG retriever — Pattern 2 (automatic pre-retrieval).
+RAG retriever — Pattern 2 (keyword-gated pre-retrieval).
 
 How it fits in the pipeline:
   User speech → VAD → STT → on_user_turn_completed()
-                                 ├── embed(user_utterance)
-                                 ├── Pinecone.query(vector, namespaces) [parallel]
+                                 ├── keyword gate: does the utterance mention
+                                 │   specs / warranty / error codes / troubleshooting?
+                                 │   NO  → skip RAG entirely (use prompt + tools)
+                                 │   YES → embed(user_utterance)
+                                 │         Pinecone.query(vector, routed_namespaces) [parallel]
                                  └── inject top-k passages into turn_ctx
                              → LLM sees system_prompt + injected context + transcript
                              → one-shot grounded answer (no extra round-trip)
+
+RAG is intentionally skipped for conversational turns, scheduling/appointment
+requests, transfers, and anything else not covered by the knowledge base.
+The agent's system prompt and function tools handle those cases.
 
 Index layout (index: "ai-agent"):
   namespace                 vectors    content
@@ -112,7 +119,9 @@ _SKIP_RAG_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# All namespaces — used as the fallback when no routing rule matches.
+# All namespaces — listed here for reference / manual use.
+# _route_namespaces() no longer falls back to this list; unrecognised queries
+# return None and skip RAG entirely.
 _ALL_NAMESPACES = [
     "unit-specs",
     "warranty-policy-details",
@@ -188,11 +197,13 @@ _ROUTING_RULES: list[tuple[re.Pattern, list[str]]] = [
 ]
 
 
-def _route_namespaces(query: str) -> list[str]:
+def _route_namespaces(query: str) -> list[str] | None:
     """
-    Return the namespaces to query for a given user utterance.
-    Matches all applicable routing rules and deduplicates.
-    Falls back to all namespaces if nothing matches.
+    Return the namespaces to query for a given user utterance, or None if the
+    utterance does not contain any technical keywords that warrant a KB lookup.
+
+    Returning None signals to retrieve() that RAG should be skipped entirely —
+    the LLM will answer using its system prompt and function tools instead.
     """
     matched: list[str] = []
     for pattern, namespaces in _ROUTING_RULES:
@@ -201,8 +212,8 @@ def _route_namespaces(query: str) -> list[str]:
                 if ns not in matched:
                     matched.append(ns)
     if not matched:
-        logger.debug("RAG routing: no rule matched — querying all namespaces")
-        return _ALL_NAMESPACES
+        logger.debug("RAG skipped — no technical keywords matched | query=%r", query[:80])
+        return None
     logger.debug("RAG routing: %s → %s", query[:60], matched)
     return matched
 
@@ -388,11 +399,9 @@ async def retrieve(
     Retrieve the most relevant HVAC knowledge base passages for a user query.
 
     Called inside HVACAssistant.on_user_turn_completed() on every user turn.
-    The returned string is injected into the chat context as an assistant
-    message before the LLM generates its response.
-
-    Queries all configured namespaces in parallel, merges results by
-    relevance score, and returns the top-k passages as a formatted string.
+    RAG is only triggered when the utterance contains technical keywords
+    (specs, warranty, error codes, troubleshooting). All other turns return ""
+    immediately so the LLM answers from its system prompt and function tools.
 
     Args:
         query:  The user's utterance (raw STT transcript).
@@ -400,7 +409,7 @@ async def retrieve(
 
     Returns:
         A newline-separated string of relevant passages,
-        or an empty string when no results are found.
+        or an empty string when RAG is skipped or no results are found.
     """
     query = query.strip()
     if not query:
@@ -419,6 +428,9 @@ async def retrieve(
         return ""
 
     namespaces = _route_namespaces(query)
+    if namespaces is None:
+        # No technical keywords found — let the LLM answer from its prompt/tools.
+        return ""
     cache_key = _cache_key(query, namespaces)
 
     # 1. Cache lookup
