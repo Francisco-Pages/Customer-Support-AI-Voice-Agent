@@ -56,6 +56,8 @@ from app.services import appointment as appointment_service
 from app.services import call as call_service
 from app.services import customer as customer_service
 from app.services import geo as geo_service
+from app.email.gmail_client import send_documents_email as _send_documents_email
+from app.documents.catalog import get_documents_sms_text
 
 logger = logging.getLogger(__name__)
 
@@ -761,6 +763,84 @@ class HVACAssistant(Agent):
         return f"SMS reply sent to {self._caller_phone}."
 
     # ------------------------------------------------------------------
+    # Function tools — email documents
+    # ------------------------------------------------------------------
+
+    @function_tool
+    async def send_documents_email(
+        self,
+        to_email: Annotated[
+            str,
+            "Customer email address to send documents to (e.g. john@example.com)",
+        ],
+        brand: Annotated[
+            str,
+            "Product brand — one of: 'Cooper and Hunter', 'Olmo', 'Bravo'",
+        ],
+        model: Annotated[
+            str,
+            "Product model name (e.g. 'Astoria', 'Multi-Zone', 'Olivia')",
+        ],
+    ) -> str:
+        """
+        Send an HTML email with product manuals, leaflets, and the brand catalog
+        to the customer's email address.
+
+        Use this when the caller asks for product documentation, manuals, spec
+        sheets, or leaflets, and you have or can confirm their email address.
+        Always confirm the email address with the caller before calling this tool.
+        If the customer record has an email on file, confirm it rather than asking.
+        """
+        if not settings.gmail_sender or not settings.gmail_app_password:
+            return (
+                "Email sending is not configured on this system. "
+                "Let the caller know you are unable to email documents at this time."
+            )
+        return await _send_documents_email(to_email, brand, model)
+
+    @function_tool
+    async def send_documents_sms(
+        self,
+        brand: Annotated[
+            str,
+            "Product brand — one of: 'Cooper and Hunter', 'Olmo', 'Bravo'",
+        ],
+        model: Annotated[
+            str,
+            "Product model name (e.g. 'Astoria', 'Multi-Zone', 'Olivia')",
+        ],
+    ) -> str:
+        """
+        Send the product document links as a plain-text SMS to the caller's phone.
+        Use this when the caller prefers text over email.
+        The links go to Google Drive where the manuals and leaflets are stored.
+        """
+        if not self._caller_phone:
+            return "Cannot send SMS — caller phone number not available for this session."
+
+        text = get_documents_sms_text(brand, model)
+        if text is None:
+            return (
+                f"No documents found for {brand} {model}. "
+                "Available brands: Cooper and Hunter, Olmo, Bravo."
+            )
+
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(
+                None,
+                lambda: self._twilio.messages.create(
+                    body=text,
+                    from_=settings.twilio_phone_number,
+                    to=self._caller_phone,
+                ),
+            )
+        except Exception as exc:
+            logger.error("Document SMS failed | to=%s error=%s", self._caller_phone, exc)
+            return f"SMS could not be sent ({exc})."
+        return f"Document links sent via SMS to {self._caller_phone}."
+
+    # ------------------------------------------------------------------
     # Function tools — geo search
     # ------------------------------------------------------------------
 
@@ -783,12 +863,26 @@ class HVACAssistant(Agent):
                 f"No certified technicians found near {city}, {state}. "
                 "I can connect you with our main support line for further assistance."
             )
-        lines = [f"Here are the 5 nearest certified technicians near {city}, {state}:"]
-        for i, r in enumerate(results, 1):
-            lines.append(
-                f"{i}. {r['name']} in {r['city']}, {r['state']} — {r['phone']}"
-            )
-        return "\n".join(lines)
+        def _fmt_entry(r: dict) -> str:
+            s = f"Name: {r['name']} | Address: {r['address']} | Phone: {r['phone']}"
+            if r.get("website"):
+                s += f" | Website: {r['website']}"
+            return s
+
+        first = results[0]
+        script = (
+            f"Say: \"The first technician I found is {first['name']}. "
+            f"Their phone number is {first['phone']}. "
+            f"They are located at {first['address']}."
+        )
+        if first.get("website"):
+            script += f" They also have a website at {first['website']}."
+        script += ' Would you like another option?"'
+
+        additional = [f"{i}. {_fmt_entry(r)}" for i, r in enumerate(results[1:], 2)]
+        if additional:
+            script += "\n\nADDITIONAL OPTIONS — present only one at a time if the caller asks:\n" + "\n".join(additional)
+        return script
 
     @function_tool
     async def search_distributors(
@@ -809,14 +903,27 @@ class HVACAssistant(Agent):
                 f"No authorized distributors found near {city}, {state}. "
                 "I can connect you with our main support line for further assistance."
             )
-        lines = [
-            f"Here are the 5 nearest authorized distributors near {city}, {state}:"
-        ]
-        for i, r in enumerate(results, 1):
-            lines.append(
-                f"{i}. {r['name']} in {r['city']}, {r['state']} — {r['phone']}"
-            )
-        return "\n".join(lines)
+
+        def _fmt_entry(r: dict) -> str:
+            s = f"Name: {r['name']} | Address: {r['address']} | Phone: {r['phone']}"
+            if r.get("website"):
+                s += f" | Website: {r['website']}"
+            return s
+
+        first = results[0]
+        script = (
+            f"Say: \"The first distributor I found is {first['name']}. "
+            f"Their phone number is {first['phone']}. "
+            f"They are located at {first['address']}."
+        )
+        if first.get("website"):
+            script += f" They also have a website at {first['website']}."
+        script += ' Would you like another option?"'
+
+        additional = [f"{i}. {_fmt_entry(r)}" for i, r in enumerate(results[1:], 2)]
+        if additional:
+            script += "\n\nADDITIONAL OPTIONS — present only one at a time if the caller asks:\n" + "\n".join(additional)
+        return script
 
     # ------------------------------------------------------------------
     # SMS side-channel watcher (private)

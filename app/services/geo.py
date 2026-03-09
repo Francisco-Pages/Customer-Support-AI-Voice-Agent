@@ -93,13 +93,17 @@ def _sync_query(vector: list[float], record_type: str, top_k: int) -> list[dict]
         parts = [p.strip() for p in address.split(",")]
         city = parts[-2] if len(parts) >= 2 else ""
         state = parts[-1] if len(parts) >= 1 else ""
-        records.append({
+        record = {
             "name": meta.get(name_field, "Unknown"),
             "city": city,
             "state": state,
             "phone": meta.get("phone_number", "N/A"),
             "address": address,
-        })
+        }
+        website = meta.get("website", "")
+        if website:
+            record["website"] = website
+        records.append(record)
     return records
 
 

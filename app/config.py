@@ -54,5 +54,9 @@ class Settings(BaseSettings):
     # Admin API
     admin_api_key: str
 
+    # Gmail (for sending product document emails)
+    gmail_sender: str = ""       # e.g. support@yourdomain.com
+    gmail_app_password: str = "" # Gmail App Password (not your account password)
+
 
 settings = Settings()

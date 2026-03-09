@@ -68,6 +68,13 @@ _FILLER_TURNS = {
     "that's all", "thats all", "nothing else", "no thanks", "no thank you",
     "not yet", "not really", "not sure", "maybe",
     "go ahead", "please", "please go ahead",
+    "correct", "that's correct", "thats correct", "yes that's correct",
+    "yes that's right", "that's right", "thats right",
+    "sounds good", "sounds great", "perfect", "great",
+    "email", "text", "sms", "both",
+    "email please", "text please", "sms please",
+    "yes email", "yes text", "yes sms",
+    "email works", "text works", "either is fine",
     # Transfer / escalation intent — no product knowledge needed.
     "transfer me", "transfer me to an agent", "transfer me to a human",
     "speak to an agent", "speak to a person", "speak to a human",
@@ -83,8 +90,25 @@ _FILLER_TURNS = {
 # Queries matching this pattern carry no technical content — skip RAG entirely.
 # Checked after _FILLER_TURNS so exact-match short-circuits first.
 _SKIP_RAG_PATTERN = re.compile(
-    r"\b(transfer|escalat|speak\s+to|talk\s+to|connect\s+me|give\s+me|get\s+me)"
-    r"\b.{0,40}\b(agent|human|person|representative|rep|specialist|someone)\b",
+    r"\b("
+    # Transfer / escalation
+    r"transfer|escalat|speak\s+to|talk\s+to|connect\s+me|give\s+me|get\s+me"
+    r")\b.{0,40}\b(agent|human|person|representative|rep|specialist|someone)\b"
+    r"|"
+    # Document / email / SMS delivery requests
+    r"\b(send|email|text|sms|document|manual|leaflet|brochure|spec\s+sheet|"
+    r"installation\s+guide|send\s+me|email\s+me|text\s+me)\b.{0,60}"
+    r"\b(manual|leaflet|document|brochure|guide|catalog|catalogue|spec|link)\b"
+    r"|"
+    # Asking for email / contact collection
+    r"\bmy\s+(email|e-mail|email\s+address)\s+is\b"
+    r"|"
+    # Name / city / state giving — pure info collection, no KB needed
+    r"\bmy\s+name\s+is\b"
+    r"|\bi('?m| am)\s+(?:calling\s+from\s+)?[A-Z][a-z]"
+    r"|\bI'?m\s+in\s+[A-Z]"
+    r"|\bI\s+live\s+in\b"
+    r"|\bI('?m| am)\s+from\b",
     re.IGNORECASE,
 )
 
