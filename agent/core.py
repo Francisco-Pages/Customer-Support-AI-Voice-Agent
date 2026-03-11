@@ -42,7 +42,7 @@ from livekit.agents import (
     room_io,
 )
 from openai import AsyncOpenAI
-from livekit.plugins import deepgram, openai, silero, noise_cancellation
+from livekit.plugins import deepgram, elevenlabs, openai, silero, noise_cancellation
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from sqlalchemy import select
 from twilio.rest import Client as TwilioClient
@@ -56,6 +56,7 @@ from app.services import appointment as appointment_service
 from app.services import call as call_service
 from app.services import customer as customer_service
 from app.services import geo as geo_service
+from app.services import parts as parts_service
 from app.email.gmail_client import send_documents_email as _send_documents_email
 from app.documents.catalog import get_documents_sms_text
 
@@ -146,13 +147,9 @@ class HVACAssistant(Agent):
             except Exception:
                 logger.warning("Redis unavailable — SMS side-channel disabled", exc_info=True)
 
-        await self.session.generate_reply(
-            instructions=(
-                "Greet the caller warmly and professionally. "
-                "Introduce yourself as Alex from HVAC support. "
-                "Ask how you can help them today. "
-                "Keep the greeting to one or two sentences."
-            )
+        await self.session.say(
+            "Hi! Thank you for calling Comfortside customer support. How can I help you today?",
+            allow_interruptions=False,
         )
 
     async def on_exit(self) -> None:
@@ -409,22 +406,61 @@ class HVACAssistant(Agent):
     @function_tool
     async def check_parts_availability(
         self,
-        query: Annotated[
+        product_model: Annotated[
             str,
-            "Part number, model number, or description of the part needed",
+            "The customer's HVAC unit model number, e.g. 'MSEABU-09HRFN1-QRD0G-P'",
         ],
+        part_type: Annotated[
+            str | None,
+            "Type of part needed, e.g. 'Fan Motor', 'Capacitor'. Omit if unknown.",
+        ] = None,
+        part_name: Annotated[
+            str | None,
+            "Specific part name if the customer mentioned one, e.g. 'Brushless DC motor'. Omit if unknown.",
+        ] = None,
     ) -> str:
         """
-        Check parts inventory for availability and compatibility with a given model.
-        Returns stock status and estimated lead time.
+        Look up the part number for a replacement part compatible with the
+        customer's HVAC unit. Product model is required; part type and part
+        name narrow the results when provided.
         """
-        # TODO: Implement once the parts_inventory table is added to the data layer.
-        #       Query: SELECT * FROM parts_inventory WHERE part_number = $1
-        #              OR $2 = ANY(compatible_with)
-        return (
-            "Parts inventory lookup is not yet connected in this system. "
-            "I can transfer you to a specialist who can check availability directly."
-        )
+        async with AsyncSessionLocal() as db:
+            matches = await parts_service.lookup_parts(
+                db,
+                product_model=product_model,
+                part_type=part_type,
+                part_name=part_name,
+            )
+
+        if not matches:
+            return (
+                f"No parts found in our catalog for model '{product_model}'"
+                + (f" — {part_type}" if part_type else "")
+                + ". I can transfer you to a specialist who can check further."
+            )
+
+        # Deduplicate by part_number (same part may match via multiple model variants).
+        seen: set[str] = set()
+        unique = []
+        for m in matches:
+            if m["part_number"] not in seen:
+                seen.add(m["part_number"])
+                unique.append(m)
+
+        if len(unique) == 1:
+            m = unique[0]
+            return (
+                f"The replacement {m['part_type']} ({m['part_name']}) "
+                f"for {m['brand']} model '{product_model}' "
+                f"has part number {m['part_number']}."
+            )
+
+        lines = [
+            f"Found {len(unique)} compatible parts for '{product_model}':"
+        ]
+        for m in unique:
+            lines.append(f"  • {m['part_number']} — {m['part_name']} ({m['part_type']}, {m['brand']})")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Function tools — appointments
@@ -1053,9 +1089,9 @@ async def hvac_agent(ctx: JobContext) -> None:
 
     # Build the voice pipeline session
     session = AgentSession(
-        stt=deepgram.STT(model="nova-2-phonecall"),   # Optimised for 8kHz phone audio
-        llm=openai.LLM(model="gpt-4o-mini"),          # Lower latency than gpt-4o
-        tts=deepgram.TTS(model="aura-2-thalia-en"),   # Much lower latency than OpenAI TTS
+        stt=openai.STT(model="gpt-4o-transcribe"),  # Auto language detection, strong Ukrainian support
+        llm=openai.LLM(model="gpt-4o-mini"),               # Lower latency than gpt-4o
+        tts=elevenlabs.TTS(model="eleven_flash_v2_5", voice_id="EXAVITQu4vr4xnSDxMaL"),  # Fast native multilingual TTS, 32 languages incl. Ukrainian
         vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
     )

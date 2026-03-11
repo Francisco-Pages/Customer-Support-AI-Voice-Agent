@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HVAC Admin — Agent Chat</title>
+  <link rel="stylesheet" href="/dashboard/style.css" />
+</head>
+<body>
+  <script src="/dashboard/app.js"></script>
+  <script>
+    if (!getKey()) { /* redirected */ }
+    renderNav('chat');
+  </script>
+
+  <div class="page" style="display:flex; flex-direction:column; height:calc(100vh - 52px); padding-bottom:0;">
+    <div class="page-header" style="flex-shrink:0;">
+      <span class="page-title">Agent Chat</span>
+      <span class="page-subtitle">Test the agent directly — tools execute against live data</span>
+    </div>
+
+    <div class="chat-shell">
+      <!-- Sidebar -->
+      <div class="chat-sidebar">
+        <div class="chat-sidebar-section">
+          <label class="filter-label">Caller Phone (optional)</label>
+          <input type="text" id="phoneInput" placeholder="+13055551234" style="width:100%;" />
+          <div class="chat-sidebar-hint">Prefills customer context if provided.</div>
+        </div>
+        <button class="btn btn-ghost" style="width:100%; margin-top:12px;" onclick="newChat()">New chat</button>
+
+        <div class="chat-sidebar-section" style="margin-top:24px;">
+          <div class="filter-label" style="margin-bottom:8px;">Tool calls this session</div>
+          <div id="toolLog" class="tool-log-empty">None yet</div>
+        </div>
+      </div>
+
+      <!-- Chat window -->
+      <div class="chat-main">
+        <div class="chat-messages" id="chatMessages">
+          <div class="chat-welcome">
+            <div class="chat-welcome-icon">🤖</div>
+            <div class="chat-welcome-title">Alex is ready</div>
+            <div class="chat-welcome-sub">Type a message below to start a test conversation.</div>
+          </div>
+        </div>
+
+        <div class="chat-input-area">
+          <div id="chatError" class="chat-error" style="display:none;"></div>
+          <div class="chat-input-row">
+            <textarea
+              id="chatInput"
+              class="chat-textarea"
+              placeholder="Type a message…"
+              rows="1"
+              onkeydown="handleKey(event)"
+              oninput="autoResize(this)"
+            ></textarea>
+            <button class="chat-send-btn" id="sendBtn" onclick="sendMessage()">Send</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let history = [];
+    let isLoading = false;
+
+    function newChat() {
+      history = [];
+      document.getElementById('chatMessages').innerHTML = `
+        <div class="chat-welcome">
+          <div class="chat-welcome-icon">🤖</div>
+          <div class="chat-welcome-title">Alex is ready</div>
+          <div class="chat-welcome-sub">Type a message below to start a test conversation.</div>
+        </div>`;
+      document.getElementById('toolLog').innerHTML = '<span class="tool-log-empty">None yet</span>';
+      hideError();
+    }
+
+    function hideError() {
+      const el = document.getElementById('chatError');
+      el.style.display = 'none';
+      el.textContent = '';
+    }
+
+    function showError(msg) {
+      const el = document.getElementById('chatError');
+      el.textContent = msg;
+      el.style.display = 'block';
+    }
+
+    function autoResize(el) {
+      el.style.height = 'auto';
+      el.style.height = Math.min(el.scrollHeight, 160) + 'px';
+    }
+
+    function handleKey(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    }
+
+    function appendMessage(role, content) {
+      const container = document.getElementById('chatMessages');
+      // Remove welcome screen on first message
+      const welcome = container.querySelector('.chat-welcome');
+      if (welcome) welcome.remove();
+
+      const div = document.createElement('div');
+      div.className = `chat-bubble ${role}`;
+      div.textContent = content;
+      container.appendChild(div);
+      container.scrollTop = container.scrollHeight;
+      return div;
+    }
+
+    function appendToolCalls(toolCalls) {
+      if (!toolCalls || toolCalls.length === 0) return;
+      const log = document.getElementById('toolLog');
+      if (log.querySelector('.tool-log-empty')) log.innerHTML = '';
+
+      toolCalls.forEach(tc => {
+        // Sidebar log entry
+        const entry = document.createElement('div');
+        entry.className = 'tool-log-entry';
+        entry.innerHTML = `<span class="tool-log-name">${tc.name}</span>`;
+        log.appendChild(entry);
+
+        // Inline in chat
+        const container = document.getElementById('chatMessages');
+        const pill = document.createElement('div');
+        pill.className = 'chat-tool-pill';
+        const argsStr = Object.entries(tc.args).map(([k,v]) => `${k}: ${v}`).join(', ');
+        pill.innerHTML = `
+          <details>
+            <summary>Used tool: <strong>${tc.name}</strong>(${argsStr})</summary>
+            <div class="chat-tool-result">${tc.result}</div>
+          </details>`;
+        container.appendChild(pill);
+        container.scrollTop = container.scrollHeight;
+      });
+    }
+
+    async function sendMessage() {
+      if (isLoading) return;
+      const input = document.getElementById('chatInput');
+      const message = input.value.trim();
+      if (!message) return;
+
+      isLoading = true;
+      hideError();
+      document.getElementById('sendBtn').disabled = true;
+      input.value = '';
+      input.style.height = 'auto';
+
+      appendMessage('user', message);
+
+      // Typing indicator
+      const container = document.getElementById('chatMessages');
+      const typing = document.createElement('div');
+      typing.className = 'chat-bubble assistant typing';
+      typing.innerHTML = '<span></span><span></span><span></span>';
+      container.appendChild(typing);
+      container.scrollTop = container.scrollHeight;
+
+      try {
+        const phone = document.getElementById('phoneInput').value.trim() || null;
+        const data = await apiJson('/admin/chat', { message, messages: history, phone });
+
+        typing.remove();
+
+        if (data) {
+          appendToolCalls(data.tool_calls);
+          appendMessage('assistant', data.reply);
+          history = data.messages;
+        }
+      } catch (err) {
+        typing.remove();
+        showError(err.message || 'Request failed.');
+      } finally {
+        isLoading = false;
+        document.getElementById('sendBtn').disabled = false;
+        input.focus();
+      }
+    }
+  </script>
+</body>
+</html>

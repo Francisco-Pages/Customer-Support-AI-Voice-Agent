@@ -212,6 +212,12 @@ def _route_namespaces(query: str) -> list[str] | None:
                 if ns not in matched:
                     matched.append(ns)
     if not matched:
+        # No English keywords matched. If the query is non-ASCII (i.e. non-English
+        # language), fall back to all namespaces so multilingual callers still get
+        # RAG context. Embedding similarity will filter out irrelevant results.
+        if any(ord(c) > 127 for c in query):
+            logger.debug("RAG routing: non-English query → all namespaces | query=%r", query[:60])
+            return _ALL_NAMESPACES
         logger.debug("RAG skipped — no technical keywords matched | query=%r", query[:80])
         return None
     logger.debug("RAG routing: %s → %s", query[:60], matched)

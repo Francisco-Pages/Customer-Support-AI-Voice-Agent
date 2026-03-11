@@ -26,6 +26,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
+
 # ---------------------------------------------------------------------------
 # Base
 # ---------------------------------------------------------------------------
@@ -246,3 +247,48 @@ class OutboundQueue(Base):
     )
 
     customer: Mapped["Customer"] = relationship(back_populates="outbound_entries")
+
+
+# ---------------------------------------------------------------------------
+# parts
+# ---------------------------------------------------------------------------
+
+
+class Part(Base):
+    __tablename__ = "parts"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    part_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    part_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    part_number: Mapped[str] = mapped_column(
+        String(100), unique=True, nullable=False, index=True
+    )
+    brand: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    compatible_models: Mapped[list["PartCompatibility"]] = relationship(
+        back_populates="part", cascade="all, delete-orphan"
+    )
+
+
+# ---------------------------------------------------------------------------
+# part_compatibility
+# ---------------------------------------------------------------------------
+
+
+class PartCompatibility(Base):
+    __tablename__ = "part_compatibility"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    part_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("parts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    product_model: Mapped[str] = mapped_column(String(150), nullable=False)
+
+    part: Mapped["Part"] = relationship(back_populates="compatible_models")

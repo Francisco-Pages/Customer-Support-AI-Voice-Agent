@@ -99,6 +99,7 @@ function renderNav(active) {
     <a href="/dashboard/calls.html" class="nav-link ${active === 'calls' ? 'active' : ''}">Call Log</a>
     <a href="/dashboard/knowledge.html" class="nav-link ${active === 'knowledge' ? 'active' : ''}">Knowledge Base</a>
     <a href="/dashboard/locations.html" class="nav-link ${active === 'locations' ? 'active' : ''}">Service Directory</a>
+    <a href="/dashboard/chat.html" class="nav-link ${active === 'chat' ? 'active' : ''}">Agent Chat</a>
     <span class="nav-spacer"></span>
     <button class="nav-logout" onclick="logout()">Sign out</button>
   `;

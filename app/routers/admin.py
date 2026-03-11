@@ -8,6 +8,7 @@ and managing the outbound queue.
 """
 
 import asyncio
+import json
 import logging
 import math
 import uuid
@@ -24,12 +25,16 @@ from pinecone import Pinecone
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agent.prompts import INBOUND_SYSTEM_PROMPT
 from app.config import settings
 from app.core.security import verify_admin_api_key
 from app.dependencies import get_db, get_redis
 from app.rag.ingestor import delete_document, ingest_document
 from app.services import call as call_service
 from app.services import campaign as campaign_service
+from app.services import customer as customer_service
+from app.services import geo as geo_service
+from app.services import parts as parts_service
 
 logger = logging.getLogger(__name__)
 
@@ -773,3 +778,250 @@ async def delete_location(
     await loop.run_in_executor(None, _delete)
     logger.info("Location deleted | type=%s id=%s", record_type, record_id)
     return DeleteLocationResponse(id=record_id, record_type=record_type)
+
+
+# ---------------------------------------------------------------------------
+# Agent chat (test interface)
+# ---------------------------------------------------------------------------
+
+_CHAT_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "check_parts_availability",
+            "description": "Look up replacement part numbers compatible with a customer's HVAC unit.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "product_model": {"type": "string", "description": "Customer's HVAC unit model number"},
+                    "part_type": {"type": "string", "description": "Type of part, e.g. Fan Motor"},
+                    "part_name": {"type": "string", "description": "Specific part name if known"},
+                },
+                "required": ["product_model"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lookup_customer",
+            "description": "Look up a customer record by phone number.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "phone": {"type": "string", "description": "E.164 phone number, e.g. +13055551234"},
+                },
+                "required": ["phone"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lookup_warranty",
+            "description": "Look up warranty status for a registered product by serial number.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "serial_number": {"type": "string"},
+                },
+                "required": ["serial_number"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_technicians",
+            "description": "Find certified HVAC technicians near a city and state.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                    "state": {"type": "string"},
+                },
+                "required": ["city", "state"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_distributors",
+            "description": "Find HVAC distributors near a city and state.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                    "state": {"type": "string"},
+                },
+                "required": ["city", "state"],
+            },
+        },
+    },
+]
+
+
+async def _execute_tool(name: str, args: dict, db: AsyncSession) -> str:
+    """Dispatch a tool call to the real service layer and return a string result."""
+    if name == "check_parts_availability":
+        matches = await parts_service.lookup_parts(
+            db,
+            product_model=args["product_model"],
+            part_type=args.get("part_type"),
+            part_name=args.get("part_name"),
+        )
+        if not matches:
+            return "No matching parts found in the catalog."
+        seen: set[str] = set()
+        lines = []
+        for m in matches:
+            if m["part_number"] not in seen:
+                seen.add(m["part_number"])
+                lines.append(
+                    f"Part number: {m['part_number']} — {m['part_name']} "
+                    f"({m['part_type']}, {m['brand']}) matched model: {m['matched_model']}"
+                )
+        return "\n".join(lines)
+
+    if name == "lookup_customer":
+        customer = await customer_service.get_by_phone_with_products(db, args["phone"])
+        if not customer:
+            return "No customer record found for that phone number."
+        products = ", ".join(p.product_model for p in customer.products) or "none"
+        return (
+            f"Customer: {customer.name or 'Unknown'}, phone: {customer.phone}, "
+            f"email: {customer.email or 'N/A'}, registered products: {products}"
+        )
+
+    if name == "lookup_warranty":
+        from sqlalchemy import select
+        from app.db.models import CustomerProduct
+        from datetime import timezone
+
+        sn = args["serial_number"]
+        result = await db.execute(
+            select(CustomerProduct).where(CustomerProduct.serial_number == sn)
+        )
+        product = result.scalar_one_or_none()
+        if not product:
+            return f"No product registered with serial number {sn}."
+        if not product.warranty_end_date:
+            return f"Product {product.product_model} (SN: {sn}) has no warranty date on file."
+        now = datetime.now(timezone.utc)
+        exp = product.warranty_end_date
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        if exp > now:
+            return (
+                f"Product {product.product_model} (SN: {sn}) is under warranty. "
+                f"Expires {exp.strftime('%B %d, %Y')} ({(exp - now).days} days remaining)."
+            )
+        return (
+            f"Product {product.product_model} (SN: {sn}) — "
+            f"warranty expired on {exp.strftime('%B %d, %Y')}."
+        )
+
+    if name == "search_technicians":
+        results = await geo_service.search(args["city"], args["state"], "technician")
+        if not results:
+            return "No technicians found near that location."
+        return "\n".join(
+            f"{r.get('name', 'Unknown')} — {r.get('phone', 'N/A')} — {r.get('address', '')}"
+            for r in results
+        )
+
+    if name == "search_distributors":
+        results = await geo_service.search(args["city"], args["state"], "distributor")
+        if not results:
+            return "No distributors found near that location."
+        return "\n".join(
+            f"{r.get('name', 'Unknown')} — {r.get('phone', 'N/A')} — {r.get('address', '')}"
+            for r in results
+        )
+
+    return f"Unknown tool: {name}"
+
+
+class ChatMessageModel(BaseModel):
+    role: str
+    content: str
+
+
+class ToolCallInfo(BaseModel):
+    name: str
+    args: dict
+    result: str
+
+
+class ChatRequest(BaseModel):
+    message: str
+    messages: list[ChatMessageModel] = []
+    phone: str | None = None
+
+
+class ChatResponse(BaseModel):
+    reply: str
+    messages: list[ChatMessageModel]
+    tool_calls: list[ToolCallInfo]
+
+
+@router.post("/chat", response_model=ChatResponse)
+async def agent_chat(payload: ChatRequest, db: AsyncSession = Depends(get_db)):
+    """
+    Send a message to the agent and get a reply.
+
+    The caller maintains conversation history and sends it back with each
+    request. Tool calls are executed server-side using real services and
+    returned for display alongside the agent reply.
+    """
+    client = AsyncOpenAI(api_key=settings.openai_api_key)
+
+    system = INBOUND_SYSTEM_PROMPT
+    if payload.phone:
+        system += f"\n\n[TEST SESSION] Caller phone: {payload.phone}"
+
+    openai_messages: list[dict] = [{"role": "system", "content": system}]
+    for m in payload.messages:
+        openai_messages.append({"role": m.role, "content": m.content})
+    openai_messages.append({"role": "user", "content": payload.message})
+
+    tool_calls_made: list[ToolCallInfo] = []
+
+    for _ in range(8):  # max agentic iterations
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=openai_messages,
+            tools=_CHAT_TOOLS,
+            tool_choice="auto",
+        )
+        msg = response.choices[0].message
+
+        if not msg.tool_calls:
+            reply = msg.content or ""
+            updated_messages = [
+                ChatMessageModel(role=m["role"], content=m["content"])
+                for m in openai_messages[1:]  # drop system prompt
+                if m.get("role") in ("user", "assistant") and m.get("content")
+            ]
+            updated_messages.append(ChatMessageModel(role="assistant", content=reply))
+            return ChatResponse(
+                reply=reply,
+                messages=updated_messages,
+                tool_calls=tool_calls_made,
+            )
+
+        # Append assistant message with tool_calls
+        openai_messages.append(msg.model_dump(exclude_unset=True))
+
+        for tc in msg.tool_calls:
+            args = json.loads(tc.function.arguments)
+            result = await _execute_tool(tc.function.name, args, db)
+            tool_calls_made.append(ToolCallInfo(name=tc.function.name, args=args, result=result))
+            openai_messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": result,
+            })
+
+    raise HTTPException(status_code=500, detail="Agent did not produce a final reply.")
