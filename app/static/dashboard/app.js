@@ -97,6 +97,7 @@ function renderNav(active) {
     <span class="nav-brand">HVAC Admin</span>
     <a href="/dashboard/index.html" class="nav-link ${active === 'overview' ? 'active' : ''}">Overview</a>
     <a href="/dashboard/calls.html" class="nav-link ${active === 'calls' ? 'active' : ''}">Call Log</a>
+    <a href="/dashboard/customers.html" class="nav-link ${active === 'customers' ? 'active' : ''}">Customers</a>
     <a href="/dashboard/knowledge.html" class="nav-link ${active === 'knowledge' ? 'active' : ''}">Knowledge Base</a>
     <a href="/dashboard/locations.html" class="nav-link ${active === 'locations' ? 'active' : ''}">Service Directory</a>
     <a href="/dashboard/chat.html" class="nav-link ${active === 'chat' ? 'active' : ''}">Agent Chat</a>

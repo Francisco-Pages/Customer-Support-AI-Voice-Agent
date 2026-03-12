@@ -152,6 +152,131 @@ def _queue_to_entry(entry) -> QueueEntry:
 
 
 # ---------------------------------------------------------------------------
+# Customers
+# ---------------------------------------------------------------------------
+
+
+class CustomerRecord(BaseModel):
+    id: UUID
+    phone: str
+    name: str | None
+    email: str | None
+    address: str | None
+    caller_type: str | None
+    tcpa_consent: bool
+    created_at: str
+    updated_at: str
+
+
+class CustomerListResponse(BaseModel):
+    total: int
+    customers: list[CustomerRecord]
+
+
+class CreateCustomerRequest(BaseModel):
+    phone: str = Field(..., min_length=1)
+    name: str | None = None
+    email: str | None = None
+    address: str | None = None
+    caller_type: str | None = Field(None, pattern="^(owner|technician)$")
+    tcpa_consent: bool = False
+
+
+class UpdateCustomerRequest(BaseModel):
+    name: str | None = None
+    email: str | None = None
+    address: str | None = None
+    caller_type: str | None = Field(None, pattern="^(owner|technician)$")
+    tcpa_consent: bool | None = None
+
+
+def _customer_to_record(c) -> CustomerRecord:
+    return CustomerRecord(
+        id=c.id,
+        phone=c.phone,
+        name=c.name,
+        email=c.email,
+        address=c.address,
+        caller_type=c.caller_type,
+        tcpa_consent=c.tcpa_consent,
+        created_at=c.created_at.isoformat(),
+        updated_at=c.updated_at.isoformat(),
+    )
+
+
+@router.get("/customers", response_model=CustomerListResponse)
+async def list_customers(
+    search: Annotated[str | None, Query(description="Search by phone, name, or email")] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    db: AsyncSession = Depends(get_db),
+):
+    """Paginated customer list with optional search."""
+    total, customers = await customer_service.list_customers(db, search=search, limit=limit, offset=offset)
+    return CustomerListResponse(total=total, customers=[_customer_to_record(c) for c in customers])
+
+
+@router.get("/customers/{customer_id}", response_model=CustomerRecord)
+async def get_customer(customer_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Retrieve a single customer by UUID."""
+    c = await customer_service.get_by_id(db, customer_id)
+    if not c:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found.")
+    return _customer_to_record(c)
+
+
+@router.post("/customers", response_model=CustomerRecord, status_code=status.HTTP_201_CREATED)
+async def create_customer(payload: CreateCustomerRequest, db: AsyncSession = Depends(get_db)):
+    """Create a new customer record."""
+    existing = await customer_service.get_by_phone(db, payload.phone)
+    if existing:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A customer with that phone number already exists.")
+    c = await customer_service.create(
+        db,
+        phone=payload.phone,
+        name=payload.name,
+        email=payload.email,
+        address=payload.address,
+        caller_type=payload.caller_type,
+        tcpa_consent=payload.tcpa_consent,
+    )
+    return _customer_to_record(c)
+
+
+@router.put("/customers/{customer_id}", response_model=CustomerRecord)
+async def update_customer(
+    customer_id: UUID,
+    payload: UpdateCustomerRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update a customer's details."""
+    from app.db.models import Customer as CustomerModel
+    c = await customer_service.get_by_id(db, customer_id)
+    if not c:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found.")
+    if payload.name is not None:
+        c.name = payload.name
+    if payload.email is not None:
+        c.email = payload.email
+    if payload.address is not None:
+        c.address = payload.address
+    if payload.caller_type is not None:
+        c.caller_type = payload.caller_type
+    if payload.tcpa_consent is not None:
+        c.tcpa_consent = payload.tcpa_consent
+    await db.flush()
+    return _customer_to_record(c)
+
+
+@router.delete("/customers/{customer_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_customer(customer_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Delete a customer and all their associated records."""
+    deleted = await customer_service.delete(db, customer_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found.")
+
+
+# ---------------------------------------------------------------------------
 # Stats
 # ---------------------------------------------------------------------------
 

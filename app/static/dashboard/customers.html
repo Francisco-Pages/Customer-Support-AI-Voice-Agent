@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HVAC Admin — Customers</title>
+  <link rel="stylesheet" href="/dashboard/style.css" />
+</head>
+<body>
+  <script src="/dashboard/app.js"></script>
+  <script>
+    if (!getKey()) { /* redirected */ }
+    renderNav('customers');
+  </script>
+
+  <div class="page">
+    <div class="page-header">
+      <span class="page-title">Customers</span>
+      <span class="page-subtitle" id="customerCount"></span>
+    </div>
+
+    <!-- Add customer -->
+    <div class="card" style="margin-bottom: 24px;">
+      <div class="card-header">
+        <span class="card-title">Add Customer</span>
+      </div>
+      <div style="padding: 20px;">
+        <div class="filter-bar" style="background: none; border: none; padding: 0; margin-bottom: 0; flex-wrap: wrap; gap: 12px; align-items: flex-end;">
+          <div class="filter-group">
+            <label class="filter-label">Phone <span style="color:var(--danger)">*</span></label>
+            <input type="text" id="addPhone" placeholder="+13055551234" style="width: 160px;" />
+          </div>
+          <div class="filter-group">
+            <label class="filter-label">Name</label>
+            <input type="text" id="addName" placeholder="Full name" style="width: 200px;" />
+          </div>
+          <div class="filter-group">
+            <label class="filter-label">Email</label>
+            <input type="email" id="addEmail" placeholder="email@example.com" style="width: 200px;" />
+          </div>
+          <div class="filter-group">
+            <label class="filter-label">Address</label>
+            <input type="text" id="addAddress" placeholder="123 Main St, Austin, TX" style="width: 260px;" />
+          </div>
+          <div class="filter-group">
+            <label class="filter-label">Type</label>
+            <select id="addCallerType" style="width: 130px;">
+              <option value="">Unknown</option>
+              <option value="owner">Owner</option>
+              <option value="technician">Technician</option>
+            </select>
+          </div>
+          <div class="filter-group" style="align-items: center; flex-direction: row; gap: 8px; margin-top: 18px;">
+            <input type="checkbox" id="addTcpa" />
+            <label for="addTcpa" class="filter-label" style="margin-bottom: 0;">TCPA Consent</label>
+          </div>
+          <button class="btn btn-primary" style="margin-top: 18px;" onclick="addCustomer()">Add</button>
+        </div>
+        <div class="upload-status" id="addStatus" style="display:none; margin-top: 14px;"></div>
+      </div>
+    </div>
+
+    <!-- Customers table -->
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">All Customers</span>
+        <div style="display: flex; gap: 8px; align-items: center; margin-left: auto;">
+          <input type="text" id="searchInput" placeholder="Search by name, phone, email…"
+                 style="width: 260px;" oninput="onSearchInput()" />
+          <button class="refresh-btn" onclick="loadCustomers()">↻ Refresh</button>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Phone</th>
+            <th>Name</th>
+            <th>Email</th>
+            <th>Address</th>
+            <th>Type</th>
+            <th>TCPA</th>
+            <th>Created</th>
+            <th style="width: 140px;"></th>
+          </tr>
+        </thead>
+        <tbody id="customersBody">
+          <tr class="loading-row"><td colspan="8">Loading…</td></tr>
+        </tbody>
+      </table>
+      <div id="paginationBar" style="display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-top: 1px solid var(--border); font-size: 13px; color: var(--muted);">
+        <span id="pageInfo"></span>
+        <div style="margin-left: auto; display: flex; gap: 6px;">
+          <button class="btn btn-ghost" style="padding: 4px 12px; font-size: 12px;" id="prevBtn" onclick="changePage(-1)" disabled>← Prev</button>
+          <button class="btn btn-ghost" style="padding: 4px 12px; font-size: 12px;" id="nextBtn" onclick="changePage(1)" disabled>Next →</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edit modal -->
+  <div class="modal-overlay" id="editModal" onclick="closeEditModal()">
+    <div class="modal" onclick="event.stopPropagation()" style="max-width: 540px;">
+      <div class="modal-header">
+        <span class="modal-title">Edit Customer</span>
+        <button class="modal-close" onclick="closeEditModal()">&#x2715;</button>
+      </div>
+      <div class="modal-body">
+        <div style="display: flex; flex-direction: column; gap: 14px; margin-bottom: 20px;">
+          <div class="filter-group">
+            <label class="filter-label">Phone</label>
+            <span id="editPhoneDisplay" style="font-family: monospace; font-size: 13px; padding: 6px 0; color: var(--muted);"></span>
+          </div>
+          <div class="filter-group">
+            <label class="filter-label">Name</label>
+            <input type="text" id="editName" style="width: 100%;" />
+          </div>
+          <div class="filter-group">
+            <label class="filter-label">Email</label>
+            <input type="email" id="editEmail" style="width: 100%;" />
+          </div>
+          <div class="filter-group">
+            <label class="filter-label">Address</label>
+            <input type="text" id="editAddress" style="width: 100%;" />
+          </div>
+          <div class="filter-group">
+            <label class="filter-label">Caller Type</label>
+            <select id="editCallerType" style="width: 160px;">
+              <option value="">Unknown</option>
+              <option value="owner">Owner</option>
+              <option value="technician">Technician</option>
+            </select>
+          </div>
+          <div class="filter-group" style="align-items: center; flex-direction: row; gap: 8px;">
+            <input type="checkbox" id="editTcpa" />
+            <label for="editTcpa" class="filter-label" style="margin-bottom: 0;">TCPA Consent</label>
+          </div>
+        </div>
+        <div style="display: flex; gap: 10px; justify-content: flex-end;">
+          <button class="btn btn-ghost" onclick="closeEditModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="confirmEdit()">Save changes</button>
+        </div>
+        <div class="upload-status" id="editStatus" style="display:none; margin-top: 14px;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Confirm delete modal -->
+  <div class="modal-overlay" id="deleteModal" onclick="closeDeleteModal()">
+    <div class="modal" onclick="event.stopPropagation()" style="max-width: 440px;">
+      <div class="modal-header">
+        <span class="modal-title">Delete Customer</span>
+        <button class="modal-close" onclick="closeDeleteModal()">&#x2715;</button>
+      </div>
+      <div class="modal-body">
+        <p style="margin-bottom: 20px; color: var(--muted); font-size: 13px; line-height: 1.6;">
+          Permanently delete <strong id="deleteCustomerName" style="color: var(--text);"></strong>?
+          This will also remove all their calls, appointments, and campaign entries.
+        </p>
+        <div style="display: flex; gap: 10px; justify-content: flex-end;">
+          <button class="btn btn-ghost" onclick="closeDeleteModal()">Cancel</button>
+          <button class="btn btn-danger" onclick="confirmDelete()">Delete</button>
+        </div>
+        <div class="upload-status" id="deleteStatus" style="display:none; margin-top: 14px;"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const PAGE_SIZE = 50;
+    let currentPage = 0;
+    let totalCustomers = 0;
+    let searchTimer = null;
+    let pendingEdit = null;
+    let pendingDelete = null;
+
+    function escHtml(str) {
+      return String(str ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function escAttr(str) {
+      return String(str ?? '').replace(/'/g, '&#39;').replace(/"/g, '&quot;');
+    }
+
+    function showStatus(id, type, html) {
+      const el = document.getElementById(id);
+      el.className = `upload-status status-${type}`;
+      el.innerHTML = html;
+      el.style.display = 'block';
+    }
+
+    function hideStatus(id) {
+      document.getElementById(id).style.display = 'none';
+    }
+
+    function callerTypeBadge(t) {
+      if (!t) return '<span class="badge badge-gray">—</span>';
+      const cls = t === 'owner' ? 'badge-blue' : 'badge-gray';
+      return `<span class="badge ${cls}">${escHtml(t)}</span>`;
+    }
+
+    /* ---- Load list ---- */
+
+    async function loadCustomers() {
+      const tbody = document.getElementById('customersBody');
+      tbody.innerHTML = '<tr class="loading-row"><td colspan="8">Loading…</td></tr>';
+      const search = document.getElementById('searchInput').value.trim();
+      try {
+        const data = await apiFetch('/admin/customers', {
+          search: search || null,
+          limit: PAGE_SIZE,
+          offset: currentPage * PAGE_SIZE,
+        });
+        if (!data) return;
+
+        totalCustomers = data.total;
+        document.getElementById('customerCount').textContent = `${data.total.toLocaleString()} total`;
+        updatePagination();
+
+        if (data.customers.length === 0) {
+          tbody.innerHTML = '<tr class="empty-row"><td colspan="8">No customers found.</td></tr>';
+          return;
+        }
+
+        tbody.innerHTML = data.customers.map(c => `
+          <tr>
+            <td style="font-family: monospace; font-size: 12px;">${escHtml(c.phone)}</td>
+            <td>${escHtml(c.name)}</td>
+            <td class="td-muted">${escHtml(c.email)}</td>
+            <td class="td-muted" style="font-size: 12px;">${escHtml(c.address)}</td>
+            <td>${callerTypeBadge(c.caller_type)}</td>
+            <td>${c.tcpa_consent ? '<span class="badge badge-green">Yes</span>' : '<span class="badge badge-gray">No</span>'}</td>
+            <td class="td-muted">${fmtDate(c.created_at)}</td>
+            <td style="white-space: nowrap;">
+              <button class="btn btn-ghost" style="padding: 4px 10px; font-size: 12px; margin-right: 4px;"
+                      onclick="openEditModal(${JSON.stringify(c).replace(/"/g, '&quot;')})">Edit</button>
+              <button class="btn btn-danger" style="padding: 4px 10px; font-size: 12px;"
+                      onclick="openDeleteModal('${escAttr(c.id)}', '${escAttr(c.name || c.phone)}')">Delete</button>
+            </td>
+          </tr>
+        `).join('');
+      } catch (err) {
+        tbody.innerHTML = `<tr class="empty-row"><td colspan="8">Error: ${escHtml(err.message)}</td></tr>`;
+      }
+    }
+
+    function updatePagination() {
+      const start = currentPage * PAGE_SIZE + 1;
+      const end = Math.min((currentPage + 1) * PAGE_SIZE, totalCustomers);
+      document.getElementById('pageInfo').textContent =
+        totalCustomers > 0 ? `Showing ${start}–${end} of ${totalCustomers.toLocaleString()}` : '';
+      document.getElementById('prevBtn').disabled = currentPage === 0;
+      document.getElementById('nextBtn').disabled = end >= totalCustomers;
+    }
+
+    function changePage(dir) {
+      currentPage += dir;
+      loadCustomers();
+    }
+
+    function onSearchInput() {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => {
+        currentPage = 0;
+        loadCustomers();
+      }, 350);
+    }
+
+    /* ---- Add ---- */
+
+    async function addCustomer() {
+      const phone = document.getElementById('addPhone').value.trim();
+      if (!phone) {
+        showStatus('addStatus', 'error', 'Phone number is required.');
+        return;
+      }
+      const body = {
+        phone,
+        name: document.getElementById('addName').value.trim() || null,
+        email: document.getElementById('addEmail').value.trim() || null,
+        address: document.getElementById('addAddress').value.trim() || null,
+        caller_type: document.getElementById('addCallerType').value || null,
+        tcpa_consent: document.getElementById('addTcpa').checked,
+      };
+      showStatus('addStatus', 'info', 'Creating customer…');
+      try {
+        const result = await apiJson('/admin/customers', body);
+        if (!result) return;
+        showStatus('addStatus', 'success',
+          `Added <strong>${escHtml(result.name || result.phone)}</strong> &nbsp;·&nbsp; id: <code>${result.id}</code>`);
+        document.getElementById('addPhone').value = '';
+        document.getElementById('addName').value = '';
+        document.getElementById('addEmail').value = '';
+        document.getElementById('addAddress').value = '';
+        document.getElementById('addCallerType').value = '';
+        document.getElementById('addTcpa').checked = false;
+        currentPage = 0;
+        loadCustomers();
+      } catch (err) {
+        showStatus('addStatus', 'error', `Failed: ${escHtml(err.message)}`);
+      }
+    }
+
+    /* ---- Edit ---- */
+
+    function openEditModal(c) {
+      pendingEdit = c.id;
+      document.getElementById('editPhoneDisplay').textContent = c.phone;
+      document.getElementById('editName').value = c.name || '';
+      document.getElementById('editEmail').value = c.email || '';
+      document.getElementById('editAddress').value = c.address || '';
+      document.getElementById('editCallerType').value = c.caller_type || '';
+      document.getElementById('editTcpa').checked = c.tcpa_consent;
+      hideStatus('editStatus');
+      document.getElementById('editModal').classList.add('open');
+    }
+
+    function closeEditModal() {
+      pendingEdit = null;
+      document.getElementById('editModal').classList.remove('open');
+    }
+
+    async function confirmEdit() {
+      if (!pendingEdit) return;
+      const body = {
+        name: document.getElementById('editName').value.trim() || null,
+        email: document.getElementById('editEmail').value.trim() || null,
+        address: document.getElementById('editAddress').value.trim() || null,
+        caller_type: document.getElementById('editCallerType').value || null,
+        tcpa_consent: document.getElementById('editTcpa').checked,
+      };
+      showStatus('editStatus', 'info', 'Saving…');
+      try {
+        await apiJson(`/admin/customers/${encodeURIComponent(pendingEdit)}`, body, 'PUT');
+        closeEditModal();
+        loadCustomers();
+      } catch (err) {
+        showStatus('editStatus', 'error', `Save failed: ${escHtml(err.message)}`);
+      }
+    }
+
+    /* ---- Delete ---- */
+
+    function openDeleteModal(id, label) {
+      pendingDelete = id;
+      document.getElementById('deleteCustomerName').textContent = label;
+      hideStatus('deleteStatus');
+      document.getElementById('deleteModal').classList.add('open');
+    }
+
+    function closeDeleteModal() {
+      pendingDelete = null;
+      document.getElementById('deleteModal').classList.remove('open');
+    }
+
+    async function confirmDelete() {
+      if (!pendingDelete) return;
+      showStatus('deleteStatus', 'info', 'Deleting…');
+      try {
+        await apiFetch(`/admin/customers/${encodeURIComponent(pendingDelete)}`, {}, 'DELETE');
+        closeDeleteModal();
+        currentPage = 0;
+        loadCustomers();
+      } catch (err) {
+        showStatus('deleteStatus', 'error', `Delete failed: ${escHtml(err.message)}`);
+      }
+    }
+
+    loadCustomers();
+  </script>
+</body>
+</html>
