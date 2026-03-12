@@ -265,6 +265,7 @@ async def update_customer(
     if payload.tcpa_consent is not None:
         c.tcpa_consent = payload.tcpa_consent
     await db.flush()
+    await db.refresh(c)
     return _customer_to_record(c)
 
 
