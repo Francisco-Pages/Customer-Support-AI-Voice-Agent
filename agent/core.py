@@ -57,6 +57,7 @@ from app.services import call as call_service
 from app.services import customer as customer_service
 from app.services import geo as geo_service
 from app.services import parts as parts_service
+from app.services import warranty as warranty_service
 from app.email.gmail_client import send_documents_email as _send_documents_email
 from app.sms.linq_client import send_sms as _linq_send_sms
 from app.documents.catalog import get_documents_sms_text
@@ -454,42 +455,34 @@ class HVACAssistant(Agent):
     ) -> str:
         """
         Check the warranty status for a product by its serial number.
-        Returns whether the warranty is active or expired and the expiry date.
+        Looks up the live Cooper & Hunter warranty database and returns
+        whether the unit is registered, the purchase/installation dates,
+        and the product name.
         """
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(
-                select(CustomerProduct).where(
-                    CustomerProduct.serial_number == serial_number.strip()
-                )
-            )
-            product = result.scalar_one_or_none()
-
-        if not product:
-            return f"No product found with serial number {serial_number!r}."
-
-        if product.warranty_end_date is None:
+        try:
+            result = await warranty_service.lookup_warranty(serial_number)
+        except Exception as exc:
+            logger.warning("Warranty scrape failed for %s: %s", serial_number, exc)
             return (
-                f"Product {product.product_model} (SN: {serial_number}) — "
-                "warranty expiry date not on file."
+                f"I wasn't able to reach the warranty database right now. "
+                "Please ask the customer to check their warranty status at "
+                "cooperandhunter.us/warranty or call back later."
             )
 
-        now = datetime.now(timezone.utc)
-        exp = (
-            product.warranty_end_date.replace(tzinfo=timezone.utc)
-            if product.warranty_end_date.tzinfo is None
-            else product.warranty_end_date
-        )
+        if not result.found:
+            return f"Serial number {serial_number!r} was not found in the Cooper & Hunter warranty database. Please double-check the serial number with the customer."
 
-        if exp >= now:
-            days_left = (exp - now).days
-            return (
-                f"Product {product.product_model} (SN: {serial_number}) is under warranty. "
-                f"Expires {exp.strftime('%B %d, %Y')} ({days_left} days remaining)."
-            )
-        return (
-            f"Product {product.product_model} (SN: {serial_number}) — "
-            f"warranty expired on {exp.strftime('%B %d, %Y')}."
-        )
+        lines = [f"Serial number: {result.serial_number}"]
+        if result.product_title:
+            lines.append(f"Product: {result.product_title}")
+        lines.append(f"Registered: {'Yes' if result.is_registered else 'No'}")
+        if result.purchase_date:
+            lines.append(f"Purchase date: {result.purchase_date}")
+        if result.installation_date:
+            lines.append(f"Installation date: {result.installation_date}")
+        if result.status_text:
+            lines.append(f"Details: {result.status_text}")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Function tools — parts
