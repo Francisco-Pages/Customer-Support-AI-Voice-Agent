@@ -58,5 +58,10 @@ class Settings(BaseSettings):
     gmail_sender: str = ""       # e.g. support@yourdomain.com
     gmail_app_password: str = "" # Gmail App Password (not your account password)
 
+    # Linq (SMS)
+    linq_api_token: str = ""          # Bearer token from Linq dashboard
+    linq_from_number: str = ""        # E.164 number provisioned on Linq
+    linq_webhook_secret: str = ""     # Signing secret from webhook subscription
+
 
 settings = Settings()

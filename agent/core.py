@@ -47,7 +47,7 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from sqlalchemy import select
 from twilio.rest import Client as TwilioClient
 
-from agent.prompts import INBOUND_SYSTEM_PROMPT, OUTBOUND_SYSTEM_PROMPT
+from agent.prompts import build_inbound_prompt, OUTBOUND_SYSTEM_PROMPT
 from app.config import settings
 from app.db.models import CustomerProduct
 from app.dependencies import AsyncSessionLocal
@@ -58,6 +58,7 @@ from app.services import customer as customer_service
 from app.services import geo as geo_service
 from app.services import parts as parts_service
 from app.email.gmail_client import send_documents_email as _send_documents_email
+from app.sms.linq_client import send_sms as _linq_send_sms
 from app.documents.catalog import get_documents_sms_text
 
 logger = logging.getLogger(__name__)
@@ -111,7 +112,9 @@ class HVACAssistant(Agent):
         room_name: str | None = None,
     ) -> None:
         instructions = (
-            INBOUND_SYSTEM_PROMPT if direction == "inbound" else OUTBOUND_SYSTEM_PROMPT
+            build_inbound_prompt(settings.linq_from_number)
+            if direction == "inbound"
+            else OUTBOUND_SYSTEM_PROMPT
         )
         super().__init__(instructions=instructions)
         self._twilio = TwilioClient(
@@ -752,16 +755,8 @@ class HVACAssistant(Agent):
         Send an SMS appointment confirmation to the customer's phone.
         Call this after every appointment is created or updated.
         """
-        loop = asyncio.get_event_loop()
         try:
-            await loop.run_in_executor(
-                None,
-                lambda: self._twilio.messages.create(
-                    body=message,
-                    from_=settings.twilio_phone_number,
-                    to=customer_phone,
-                ),
-            )
+            await _linq_send_sms(to=customer_phone, message=message)
         except Exception as exc:
             logger.error("SMS send failed | to=%s error=%s", customer_phone, exc)
             return f"SMS could not be sent ({exc}). The appointment was still saved."
@@ -783,16 +778,8 @@ class HVACAssistant(Agent):
         if not self._caller_phone:
             return "Cannot send SMS reply — caller phone number not available for this session."
 
-        loop = asyncio.get_event_loop()
         try:
-            await loop.run_in_executor(
-                None,
-                lambda: self._twilio.messages.create(
-                    body=message,
-                    from_=settings.twilio_phone_number,
-                    to=self._caller_phone,
-                ),
-            )
+            await _linq_send_sms(to=self._caller_phone, message=message)
         except Exception as exc:
             logger.error("SMS reply failed | to=%s error=%s", self._caller_phone, exc)
             return f"SMS reply could not be sent ({exc})."
@@ -861,16 +848,8 @@ class HVACAssistant(Agent):
                 "Available brands: Cooper and Hunter, Olmo, Bravo."
             )
 
-        loop = asyncio.get_event_loop()
         try:
-            await loop.run_in_executor(
-                None,
-                lambda: self._twilio.messages.create(
-                    body=text,
-                    from_=settings.twilio_phone_number,
-                    to=self._caller_phone,
-                ),
-            )
+            await _linq_send_sms(to=self._caller_phone, message=text)
         except Exception as exc:
             logger.error("Document SMS failed | to=%s error=%s", self._caller_phone, exc)
             return f"SMS could not be sent ({exc})."
@@ -1008,7 +987,7 @@ class HVACAssistant(Agent):
 
                 # Pass as user_input so the framework adds it to the persistent
                 # chat history via its normal scheduling path.
-                await self.session.generate_reply(
+                handle = self.session.generate_reply(
                     user_input=f"[Customer sent via SMS]: {sms_body}",
                     chat_ctx=chat_ctx,
                     instructions=(
@@ -1017,31 +996,32 @@ class HVACAssistant(Agent):
                     ),
                 )
 
-                # After playout, grab the agent's response from history and send
-                # it as an SMS reply. We do this in code rather than asking the
-                # LLM to call a tool — tool compliance is unreliable for this.
+                # Wait for playout, shielded so cancellation doesn't abort the send.
                 try:
-                    last_reply = next(
-                        (m for m in reversed(self.session.history.messages()) if m.role == "assistant"),
-                        None,
-                    )
-                    reply_text = last_reply.text_content if last_reply else None
-                    logger.info("SMS reply | last_reply=%s text=%r", last_reply is not None, reply_text and reply_text[:80])
-                    if reply_text:
-                        loop = asyncio.get_event_loop()
-                        await loop.run_in_executor(
-                            None,
-                            lambda: self._twilio.messages.create(
-                                body=reply_text[:1600],
-                                from_=settings.twilio_phone_number,
-                                to=phone,
-                            ),
-                        )
+                    await asyncio.shield(handle.wait_for_playout())
+                except asyncio.CancelledError:
+                    pass  # task cancelled but we still want to send the SMS below
+
+                # Read the reply directly from the handle — more reliable than
+                # session.history (avoids stale messages and post-activity race).
+                reply_text: str | None = None
+                for item in handle.chat_items:
+                    if isinstance(item, ChatMessage) and item.role == "assistant":
+                        t = item.text_content
+                        if t:
+                            reply_text = t
+                            break
+
+                logger.info("SMS reply | items=%d reply_text=%r", len(handle.chat_items), reply_text and reply_text[:80])
+
+                if reply_text:
+                    try:
+                        await asyncio.shield(_linq_send_sms(to=phone, message=reply_text[:1600]))
                         logger.info("SMS reply sent | to=%s", phone)
-                    else:
-                        logger.warning("SMS reply skipped — no assistant text in history")
-                except Exception as exc:
-                    logger.error("SMS reply failed | to=%s error=%r", phone, exc)
+                    except Exception as exc:
+                        logger.error("SMS reply failed | to=%s error=%r", phone, exc)
+                else:
+                    logger.warning("SMS reply skipped — no assistant text in handle | items=%s", handle.chat_items)
         except asyncio.CancelledError:
             pass
         finally:
