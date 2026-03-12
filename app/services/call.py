@@ -100,6 +100,18 @@ async def finalize_call(
     return call
 
 
+async def link_customer(
+    db: AsyncSession,
+    twilio_call_sid: str,
+    customer_id: uuid.UUID,
+) -> None:
+    """Backfill customer_id on a call record that was created before the customer existed."""
+    call = await get_by_sid(db, twilio_call_sid)
+    if call and call.customer_id is None:
+        call.customer_id = customer_id
+        await db.flush()
+
+
 async def flag_safety_event(db: AsyncSession, caller_phone: str) -> Call | None:
     """Mark the most recent call from caller_phone as a safety event."""
     result = await db.execute(

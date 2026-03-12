@@ -126,6 +126,8 @@ class HVACAssistant(Agent):
         self._twilio_call_sid: str | None = None
         self._sms_task: asyncio.Task | None = None
         self._session_ref: AgentSession | None = None  # Set by hvac_agent() after start
+        self._customer_context: str | None = None  # Pre-loaded on on_enter for first-turn injection
+        self._customer_context_injected: bool = False
 
     # ------------------------------------------------------------------
     # Session lifecycle hooks
@@ -150,10 +152,44 @@ class HVACAssistant(Agent):
             except Exception:
                 logger.warning("Redis unavailable — SMS side-channel disabled", exc_info=True)
 
-        await self.session.say(
-            "Hi! Thank you for calling Comfortside customer support. How can I help you today?",
-            allow_interruptions=False,
-        )
+        # Pre-load customer record so the LLM knows who is calling from turn 1.
+        greeting = "Hi! Thank you for calling Comfortside customer support. How can I help you today?"
+        if self._caller_phone:
+            try:
+                async with AsyncSessionLocal() as db:
+                    customer = await customer_service.get_by_phone_with_products(db, self._caller_phone)
+                    if customer:
+                        lines = [
+                            f"[CALLER CONTEXT — pre-loaded, do NOT call lookup_customer again]",
+                            f"Name: {customer.name or 'Unknown'}",
+                            f"Phone: {customer.phone}",
+                        ]
+                        if customer.address:
+                            lines.append(f"Address: {customer.address}")
+                        if customer.products:
+                            product_strs = [
+                                f"{p.product_model} ({p.product_line})"
+                                + (f" — SN: {p.serial_number}" if p.serial_number else "")
+                                + (f" — Warranty expires: {p.warranty_end_date.strftime('%Y-%m-%d')}" if p.warranty_end_date else "")
+                                for p in customer.products
+                            ]
+                            lines.append("Registered products: " + "; ".join(product_strs))
+                        _, recent_calls = await call_service.list_calls(db, customer_id=customer.id, limit=3)
+                        if recent_calls:
+                            call_lines = [
+                                f"  [{c.started_at.strftime('%Y-%m-%d') if c.started_at else 'unknown'}] "
+                                f"({c.resolution or 'unresolved'}): {c.summary or 'No summary.'}"
+                                for c in recent_calls
+                            ]
+                            lines.append("Recent call history:\n" + "\n".join(call_lines))
+                        self._customer_context = "\n".join(lines)
+                        if customer.name:
+                            first_name = customer.name.split()[0]
+                            greeting = f"Welcome back, {first_name}! How can I help you today?"
+            except Exception:
+                logger.warning("Customer pre-load failed — continuing without context", exc_info=True)
+
+        await self.session.say(greeting, allow_interruptions=False)
 
     async def on_exit(self) -> None:
         """Cancel the SMS watcher, remove the active_call key, and save post-call data."""
@@ -291,6 +327,12 @@ class HVACAssistant(Agent):
         Injected messages are scoped to this turn only and are not persisted
         to the chat history, keeping the context window lean.
         """
+        # Inject pre-loaded customer context on the first turn so the LLM
+        # knows who is calling without needing to call lookup_customer.
+        if not self._customer_context_injected and self._customer_context:
+            turn_ctx.add_message(role="system", content=self._customer_context)
+            self._customer_context_injected = True
+
         query = new_message.text_content
         if not query:
             return
@@ -325,11 +367,16 @@ class HVACAssistant(Agent):
     ) -> str:
         """
         Look up a customer record by phone number.
-        Returns their name, address, and registered products with warranty dates.
+        Returns their name, address, registered products, and recent call history.
         Call this at the start of every inbound call to personalise the conversation.
         """
+        recent_calls: list = []
         async with AsyncSessionLocal() as db:
             customer = await customer_service.get_by_phone_with_products(db, phone)
+            if customer:
+                _, recent_calls = await call_service.list_calls(
+                    db, customer_id=customer.id, limit=3
+                )
 
         if not customer:
             return "No customer record found for that phone number."
@@ -354,7 +401,49 @@ class HVACAssistant(Agent):
         else:
             lines.append("No registered products on file.")
 
+        if recent_calls:
+            call_lines = []
+            for c in recent_calls:
+                date = c.started_at.strftime("%Y-%m-%d") if c.started_at else "unknown date"
+                summary = c.summary or "No summary."
+                resolution = c.resolution or "unresolved"
+                call_lines.append(f"  [{date}] ({resolution}): {summary}")
+            lines.append("Recent call history:\n" + "\n".join(call_lines))
+
         return "\n".join(lines)
+
+    @function_tool
+    async def save_customer_info(
+        self,
+        name: Annotated[str, "Caller's name — first name, or first and last name"],
+        caller_type: Annotated[str | None, "Type of caller: 'owner' (product owner/homeowner) or 'technician' (HVAC technician or installer)"] = None,
+        email: Annotated[str | None, "Caller's email address, if they provided it"] = None,
+    ) -> str:
+        """
+        Save or update the caller's name, type, and optionally email in the customer database.
+
+        Call this immediately after the caller tells you their name for the first time.
+        Also call it any time the caller provides or corrects their email address, or
+        when you determine whether they are an owner or a technician.
+        This ensures the caller is recognised by name on future calls.
+        """
+        if not self._caller_phone:
+            return "Cannot save customer info — caller phone number not available."
+
+        async with AsyncSessionLocal() as db:
+            customer, created = await customer_service.get_or_create(db, self._caller_phone)
+            await customer_service.update(db, customer.id, name=name, email=email or None, caller_type=caller_type or None)
+            if self._twilio_call_sid:
+                await call_service.link_customer(db, self._twilio_call_sid, customer.id)
+            await db.commit()
+
+        action = "created" if created else "updated"
+        result = f"Customer record {action} — name: {name}"
+        if caller_type:
+            result += f", type: {caller_type}"
+        if email:
+            result += f", email: {email}"
+        return result
 
     @function_tool
     async def lookup_warranty(

@@ -53,6 +53,8 @@ class Customer(Base):
     name: Mapped[str | None] = mapped_column(String(200))
     email: Mapped[str | None] = mapped_column(String(200))
     address: Mapped[str | None] = mapped_column(Text)
+    # "owner" | "technician" | None (unknown)
+    caller_type: Mapped[str | None] = mapped_column(String(20))
     tcpa_consent: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )

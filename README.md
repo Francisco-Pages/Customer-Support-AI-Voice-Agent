@@ -36,10 +36,8 @@ HVAC customers frequently need support for product troubleshooting, warranty inq
 ### 1.4 Non-Goals
 
 - The agent will not replace human agents for complex technical repairs or legal disputes
-- The agent will not handle video or chat — voice only in v1
+- The agent will not handle video or chat — voice and iMessage side-channel only
 - The agent will not process payments directly (can transfer to secure IVR)
-- The agent will not support languages other than English in v1
-- The agent will not provide an admin dashboard in v1 — administration is API-only
 
 ### 1.5 Success Metrics
 
@@ -81,7 +79,7 @@ HVAC customers frequently need support for product troubleshooting, warranty inq
 - FR-18: All calls must be logged with: caller ID, timestamp, duration, transcript, resolution status, and agent actions taken
 - FR-19: Customer records must include: name, phone number, address, registered products, service history, TCPA consent status
 - FR-20: Conversation summaries must be stored and surfaced to the agent on repeat calls
-- FR-21: An SMS appointment confirmation must be sent via Twilio Messaging after any appointment is created or modified
+- FR-21: An iMessage appointment confirmation must be sent via Linq after any appointment is created or modified
 
 #### 1.6.5 Product Scope
 - FR-22: The agent must support queries related to residential HVAC units (installation, troubleshooting, maintenance, warranty)
@@ -106,12 +104,12 @@ HVAC customers frequently need support for product troubleshooting, warranty inq
 
 ### 1.8 Constraints & Assumptions
 
-- Callers are English-speaking (multilingual support is out of scope for v1)
-- The Pinecone vector database is already populated with HVAC product documentation
+- Callers can speak any language — STT and TTS are multilingual
+- The Pinecone vector database is populated via the admin dashboard document ingestion tool
 - TCPA consent is collected and stored before any outbound campaigns are triggered
 - All customer-facing integrations are built from scratch — no existing CRM, ERP, or scheduling system
 - Human agent transfer is handled via Twilio's `<Dial>` verb or SIP transfer
-- Admin operations are performed via REST API; no web dashboard in v1
+- Admin operations are performed via both REST API and the web dashboard at `/dashboard/`
 - Escalation always offers the caller two options: immediate live transfer or scheduled callback
 
 ---
@@ -178,12 +176,13 @@ HVAC customers frequently need support for product troubleshooting, warranty inq
 
 ### 2.2 Component Breakdown
 
-#### 2.2.1 Telephony Layer (Twilio)
-- Receives inbound PSTN calls and responds with TwiML to open a Media Stream WebSocket
+#### 2.2.1 Telephony Layer (Twilio + Linq)
+- Receives inbound PSTN calls and responds with TwiML that routes audio through LiveKit SIP
 - Initiates outbound calls via Twilio REST API with pre-validated TCPA-consented numbers
-- Handles call transfer (`<Dial>`), hold music, and voicemail detection (AMD)
-- Sends SMS appointment confirmations via Twilio Messaging API
-- Webhooks: `/inbound` (call start), `/status` (call events)
+- Handles call transfer (`<Dial>`) to human agent line; voicemail detection (AMD) is a TODO
+- All messaging (appointment SMS, document links, conversational replies) goes through **Linq iMessage API** — the Linq number is an iMessage handle; `preferred_service: "iMessage"`
+- Callers can text the Linq number during a call; messages are relayed to the agent via Redis pub/sub
+- Webhooks: `/inbound` (call start), `/status` (call events), `/linq/webhook` (inbound iMessage)
 
 #### 2.2.2 API Layer (FastAPI)
 - Stateless webhook handler for Twilio events
@@ -192,12 +191,14 @@ HVAC customers frequently need support for product troubleshooting, warranty inq
 - Admin endpoints (API key protected): campaign dispatch, call record queries, customer management
 - Authentication: API key for internal/admin services, Twilio signature validation for webhooks
 
-#### 2.2.3 Voice AI Pipeline (LiveKit Agents SDK — self-hosted on AWS)
-- **STT**: Deepgram Nova-2 (optimized for telephony audio, low latency)
-- **LLM**: GPT-4o with function calling enabled
-- **TTS**: OpenAI TTS (`tts-1`) — streamed for low time-to-first-audio
+#### 2.2.3 Voice AI Pipeline (LiveKit Agents SDK — LiveKit Cloud)
+- **STT**: OpenAI `gpt-4o-transcribe` — multilingual, strong support for non-English languages
+- **LLM**: GPT-4o-mini with function calling enabled (lower latency than GPT-4o)
+- **TTS**: ElevenLabs `eleven_flash_v2_5` (voice: `EXAVITQu4vr4xnSDxMaL`) — fast native multilingual TTS, 32 languages
 - **VAD**: Silero VAD for end-of-utterance detection on noisy phone audio
-- **Turn management**: Handles interruptions, barge-in, and silence timeouts
+- **Turn detection**: LiveKit `MultilingualModel` for accurate turn-end detection across languages
+- **Noise cancellation**: `BVCTelephony` for SIP participants (narrowband 8kHz), `BVC` for WebRTC
+- **Background audio**: Keyboard-typing sound played during agent thinking state to mask LLM latency
 
 #### 2.2.4 Agent Core (GPT-4o)
 - Stateful conversation with a rolling context window
@@ -221,16 +222,19 @@ HVAC customers frequently need support for product troubleshooting, warranty inq
 | Tool | Description | Data Source |
 |---|---|---|
 | `lookup_customer` | Fetch customer record by phone number | PostgreSQL |
-| `lookup_warranty` | Check warranty status by serial number or customer ID | PostgreSQL |
-| `check_parts_availability` | Query parts inventory by part number or description | PostgreSQL |
+| `lookup_warranty` | Check warranty status by serial number | PostgreSQL |
+| `check_parts_availability` | Query parts catalog by model and part type | PostgreSQL |
 | `create_appointment` | Schedule a service appointment | PostgreSQL |
 | `update_appointment` | Modify or cancel an existing appointment | PostgreSQL |
 | `get_call_history` | Retrieve prior call summaries for the caller | PostgreSQL |
-| `transfer_to_agent` | Trigger Twilio live call transfer to human agent | Twilio API |
-| `schedule_callback` | Book a human agent callback for the customer | PostgreSQL |
-| `send_appointment_sms` | Send SMS appointment confirmation to caller | Twilio Messaging API |
-| `search_technicians` | Find the 5 nearest certified technicians for a given city and state | Pinecone (geo index) |
-| `search_distributors` | Find the 5 nearest authorized distributors for a given city and state | Pinecone (geo index) |
+| `transfer_to_agent` | Live transfer via LiveKit SIP participant removal → Twilio `<Dial>` | LiveKit + Twilio |
+| `schedule_callback` | Book a human agent callback at customer's preferred time | PostgreSQL |
+| `send_appointment_sms` | Send appointment confirmation via Linq iMessage | Linq API |
+| `reply_via_sms` | Send conversational iMessage reply to caller's phone | Linq API |
+| `send_documents_email` | Email product manuals and spec sheets (HTML) | Gmail SMTP |
+| `send_documents_sms` | Text document links (Google Drive) to caller | Linq API |
+| `search_technicians` | Find 5 nearest certified technicians by city/state | Pinecone (geo index) |
+| `search_distributors` | Find 5 nearest authorized distributors by city/state | Pinecone (geo index) |
 
 #### 2.2.7 Data Layer
 
@@ -935,21 +939,24 @@ When the agent cannot resolve an issue, it always presents the caller with two e
 
 | Layer | Technology |
 |---|---|
-| Language | Python 3.11+ |
+| Language | Python 3.12 |
 | API Framework | FastAPI |
-| Voice Platform | LiveKit Agents SDK (self-hosted on AWS EC2) |
-| Telephony | Twilio (Voice + Messaging API) |
-| LLM | OpenAI GPT-4o |
-| STT | Deepgram Nova-2 |
-| TTS | OpenAI TTS (`tts-1`) |
-| Embeddings | OpenAI `text-embedding-3-small` |
-| Vector Database | Pinecone (managed) |
-| SQL Database | PostgreSQL (AWS RDS) |
-| ORM | SQLAlchemy + Alembic |
-| Cache | Redis (AWS ElastiCache) |
-| Task Queue | ARQ (async Redis-based) |
+| Voice Platform | LiveKit Agents SDK ~1.4 (LiveKit Cloud) |
+| Telephony | Twilio Voice (SIP trunk → LiveKit) |
+| Messaging | Linq Partner API v3 (iMessage) |
+| Email | Gmail SMTP via App Password |
+| LLM | OpenAI GPT-4o-mini |
+| STT | OpenAI `gpt-4o-transcribe` |
+| TTS | ElevenLabs `eleven_flash_v2_5` |
+| Embeddings | OpenAI `text-embedding-3-small` (1536-dim) |
+| Vector Database | Pinecone — `ai-agent` index (knowledge base) + `locations` index (geo) |
+| SQL Database | PostgreSQL (local dev / AWS RDS in prod) |
+| ORM | SQLAlchemy 2.0 (async) + asyncpg + Alembic |
+| Cache | Redis (local / AWS ElastiCache) |
+| Task Queue | ARQ (async Redis-based) — outbound campaign worker (TODO) |
+| Admin Dashboard | Custom HTML/JS dashboard at `/dashboard/` |
 | Containerization | Docker + Docker Compose (dev) / ECS Fargate (prod) |
-| Secrets Management | AWS Secrets Manager |
+| Secrets Management | AWS Secrets Manager (prod) / `.env` (dev) |
 | Monitoring | AWS CloudWatch |
 
 ---

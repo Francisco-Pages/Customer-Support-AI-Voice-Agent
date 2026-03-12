@@ -40,7 +40,7 @@
         <div class="upload-controls">
           <div class="filter-group">
             <label class="filter-label">Target Namespace</label>
-            <select id="namespaceSelect">
+            <select id="namespaceSelect" onchange="if(selectedFile) validateFile()">
               <option value="unit-specs">unit-specs — Product specifications</option>
               <option value="warranty-policy-details">warranty-policy-details — Warranty terms</option>
               <option value="error-codes" selected>error-codes — Error code reference</option>
@@ -51,6 +51,9 @@
             Upload &amp; Ingest
           </button>
         </div>
+
+        <!-- Validation result -->
+        <div class="upload-status" id="validationStatus" style="display:none"></div>
 
         <!-- Status -->
         <div class="upload-status" id="uploadStatus" style="display:none"></div>
@@ -171,7 +174,7 @@
       if (file) handleFileSelect(file);
     });
 
-    function handleFileSelect(file) {
+    async function handleFileSelect(file) {
       if (!file) return;
       const allowed = ['txt', 'md', 'pdf', 'docx'];
       const ext = file.name.split('.').pop().toLowerCase();
@@ -182,8 +185,47 @@
       selectedFile = file;
       document.getElementById('dropZoneFilename').textContent = file.name;
       dropZone.classList.add('has-file');
-      document.getElementById('uploadBtn').disabled = false;
       hideStatus('uploadStatus');
+      hideStatus('validationStatus');
+      document.getElementById('uploadBtn').disabled = true;
+
+      // Auto-validate against the currently selected namespace
+      await validateFile();
+    }
+
+    async function validateFile() {
+      if (!selectedFile) return;
+      const namespace = document.getElementById('namespaceSelect').value;
+      const btn = document.getElementById('uploadBtn');
+
+      showStatus('validationStatus', 'info', '🔍 Checking document against namespace…');
+      btn.disabled = true;
+
+      try {
+        const formData = new FormData();
+        formData.append('file', selectedFile);
+
+        const data = await apiUpload(
+          `/admin/documents/validate?namespace=${encodeURIComponent(namespace)}`,
+          formData
+        );
+        if (!data) { btn.disabled = false; return; }
+
+        const confidenceLabel = { high: '●', medium: '◑', low: '○' }[data.confidence] || '○';
+        const detectedLabel = data.detected_type || 'unknown';
+
+        if (data.match) {
+          showStatus('validationStatus', 'success',
+            `${confidenceLabel} <strong>Good match</strong> — Detected as <em>${detectedLabel}</em>. ${data.reason}`);
+        } else {
+          showStatus('validationStatus', 'warning',
+            `⚠ <strong>Possible mismatch</strong> — Detected as <em>${detectedLabel}</em>, but target namespace is <em>${namespace}</em>. ${data.reason} You can still upload if this is correct.`);
+        }
+        btn.disabled = false;
+      } catch (err) {
+        showStatus('validationStatus', 'warning', `⚠ Validation unavailable — ${err.message}. You can still upload.`);
+        btn.disabled = false;
+      }
     }
 
     /* ---- Upload ---- */

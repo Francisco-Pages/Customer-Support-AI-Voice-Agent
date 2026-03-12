@@ -31,6 +31,27 @@ async def get_by_id(db: AsyncSession, customer_id: uuid.UUID) -> Customer | None
     return result.scalar_one_or_none()
 
 
+async def update(
+    db: AsyncSession,
+    customer_id: uuid.UUID,
+    name: str | None = None,
+    email: str | None = None,
+    caller_type: str | None = None,
+) -> Customer | None:
+    """Update a customer's name, email, and/or caller_type. Skips None fields."""
+    customer = await get_by_id(db, customer_id)
+    if not customer:
+        return None
+    if name is not None:
+        customer.name = name
+    if email is not None:
+        customer.email = email
+    if caller_type is not None:
+        customer.caller_type = caller_type
+    await db.flush()
+    return customer
+
+
 async def get_or_create(db: AsyncSession, phone: str) -> tuple[Customer, bool]:
     """
     Return (customer, was_created).

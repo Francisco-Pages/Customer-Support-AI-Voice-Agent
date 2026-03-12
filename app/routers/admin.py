@@ -299,6 +299,116 @@ class DeleteDocumentResponse(BaseModel):
     vectors_deleted: int
 
 
+class ValidateDocumentResponse(BaseModel):
+    match: bool          # True = content fits the namespace
+    confidence: str      # "high" | "medium" | "low"
+    detected_type: str   # e.g. "error code reference"
+    reason: str          # one-sentence explanation
+
+
+_NAMESPACE_DESCRIPTIONS = {
+    "unit-specs": "product specifications (model numbers, BTU ratings, dimensions, refrigerant types, technical capacities)",
+    "warranty-policy-details": "warranty policy (coverage terms, duration, registration requirements, exclusions)",
+    "error-codes": "error code reference (fault codes shown on unit display, diagnostic codes with descriptions)",
+    "common-troubleshooting": "troubleshooting guide (step-by-step fixes, common HVAC problems and solutions)",
+}
+
+_CLASSIFY_PROMPT = """\
+You are classifying an HVAC document to determine which knowledge base namespace it belongs to.
+
+Namespaces:
+- unit-specs: {unit_specs}
+- warranty-policy-details: {warranty}
+- error-codes: {error_codes}
+- common-troubleshooting: {troubleshooting}
+
+Respond ONLY with valid JSON (no markdown, no extra text):
+{{"category": "<namespace>", "confidence": "high|medium|low", "reason": "<one sentence>"}}
+
+Document excerpt:
+{excerpt}
+"""
+
+
+@router.post("/documents/validate", response_model=ValidateDocumentResponse)
+async def validate_document_endpoint(
+    file: UploadFile,
+    namespace: Annotated[
+        str,
+        Query(description="Target namespace to validate against"),
+    ],
+):
+    """
+    Pre-flight check: parse the uploaded file and ask GPT-4o-mini whether
+    its content matches the selected namespace.  Returns match=True/False,
+    confidence, detected type, and a one-sentence reason.
+
+    This endpoint does NOT write anything to Pinecone.
+    """
+    if namespace not in _VALID_NAMESPACES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid namespace '{namespace}'.",
+        )
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty.")
+
+    filename = file.filename or "upload"
+
+    from app.rag.ingestor import parse_file
+    try:
+        text = parse_file(filename, content)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
+    # Use the first 1 500 characters as the classification sample
+    excerpt = text.strip()[:1500]
+    if not excerpt:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="No text could be extracted.")
+
+    prompt = _CLASSIFY_PROMPT.format(
+        unit_specs=_NAMESPACE_DESCRIPTIONS["unit-specs"],
+        warranty=_NAMESPACE_DESCRIPTIONS["warranty-policy-details"],
+        error_codes=_NAMESPACE_DESCRIPTIONS["error-codes"],
+        troubleshooting=_NAMESPACE_DESCRIPTIONS["common-troubleshooting"],
+        excerpt=excerpt,
+    )
+
+    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    try:
+        resp = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=120,
+            temperature=0,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        parsed = json.loads(raw)
+    except Exception as exc:
+        logger.warning("Document classification failed | file=%s error=%s", filename, exc)
+        # If classification fails, allow upload with low confidence
+        return ValidateDocumentResponse(
+            match=True,
+            confidence="low",
+            detected_type="unknown",
+            reason="Classification unavailable — content could not be automatically verified.",
+        )
+
+    detected = parsed.get("category", "")
+    confidence = parsed.get("confidence", "low")
+    reason = parsed.get("reason", "")
+    match = detected == namespace
+
+    return ValidateDocumentResponse(
+        match=match,
+        confidence=confidence,
+        detected_type=_NAMESPACE_DESCRIPTIONS.get(detected, detected),
+        reason=reason,
+    )
+
+
 @router.post("/documents/ingest", response_model=IngestResponse, status_code=status.HTTP_201_CREATED)
 async def ingest_document_endpoint(
     file: UploadFile,
