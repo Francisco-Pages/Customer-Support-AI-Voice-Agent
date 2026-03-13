@@ -57,6 +57,7 @@
             <th>Duration</th>
             <th>Resolution</th>
             <th>Safety</th>
+            <th>Rec</th>
             <th>Summary</th>
           </tr>
         </thead>
@@ -89,6 +90,12 @@
         <div class="panel-section" style="margin-top:20px">
           <div class="panel-section-title">Transcript</div>
           <div class="panel-section-body" id="modalTranscript" style="font-family:monospace;font-size:12px;background:#f8f9fc;padding:12px;border-radius:6px;max-height:340px;overflow-y:auto;">—</div>
+        </div>
+        <div class="panel-section" id="recordingSection" style="margin-top:20px;display:none">
+          <div class="panel-section-title">Recording</div>
+          <div class="panel-section-body">
+            <audio id="modalAudio" controls style="width:100%"></audio>
+          </div>
         </div>
         <div class="panel-section" style="margin-top:20px">
           <div class="panel-section-title">Metadata</div>
@@ -139,7 +146,7 @@
 
     async function loadCalls() {
       document.getElementById('callsBody').innerHTML =
-        '<tr class="loading-row"><td colspan="6">Loading…</td></tr>';
+        '<tr class="loading-row"><td colspan="8">Loading…</td></tr>';
 
       try {
         const data = await apiFetch('/admin/calls', {
@@ -159,7 +166,7 @@
 
         if (!data.calls || data.calls.length === 0) {
           document.getElementById('callsBody').innerHTML =
-            '<tr class="empty-row"><td colspan="7">No calls match your filters.</td></tr>';
+            '<tr class="empty-row"><td colspan="8">No calls match your filters.</td></tr>';
           return;
         }
 
@@ -171,6 +178,7 @@
             <td>${fmtDuration(c.duration_sec)}</td>
             <td>${resolutionBadge(c.resolution)}</td>
             <td>${safetyBadge(c.safety_event)}</td>
+            <td>${c.has_recording ? '🎙' : ''}</td>
             <td class="td-muted">${c.summary ? c.summary.slice(0, 90) + (c.summary.length > 90 ? '…' : '') : '—'}</td>
           </tr>
         `).join('');
@@ -186,6 +194,18 @@
       document.getElementById('modalSummary').textContent = call.summary || 'No summary available.';
       document.getElementById('modalMeta').textContent =
         `SID: ${call.twilio_call_sid}\nDuration: ${fmtDuration(call.duration_sec)}\nResolution: ${call.resolution || '—'}\nEnded: ${fmtDate(call.ended_at)}`;
+
+      // Recording
+      const recSection = document.getElementById('recordingSection');
+      const audio = document.getElementById('modalAudio');
+      if (call.has_recording) {
+        audio.src = `/admin/calls/${call.id}/recording`;
+        audio.load();
+        recSection.style.display = '';
+      } else {
+        audio.src = '';
+        recSection.style.display = 'none';
+      }
 
       // Fetch full record for transcript
       document.getElementById('modalTranscript').textContent = 'Loading transcript…';
@@ -203,6 +223,9 @@
     function closeModal(event) {
       if (!event || event.target === document.getElementById('modalOverlay')) {
         document.getElementById('modalOverlay').classList.remove('open');
+        const audio = document.getElementById('modalAudio');
+        audio.pause();
+        audio.src = '';
       }
     }
 

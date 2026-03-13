@@ -155,6 +155,8 @@ class Call(Base):
     safety_event: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )
+    recording_sid: Mapped[str | None] = mapped_column(String(100))
+    recording_url: Mapped[str | None] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

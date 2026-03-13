@@ -54,11 +54,16 @@ def _sip_twiml(phone_number: str) -> VoiceResponse:
     """
     sip_uri = f"sip:{phone_number}@{settings.livekit_sip_host}"
     response = VoiceResponse()
+    base = settings.app_base_url.rstrip("/")
     dial = Dial(
         # Answer supervision — Twilio waits for SIP 200 OK before billing
         answer_on_bridge=True,
         # Post-call status callback
-        action=f"{settings.app_base_url.rstrip('/')}/telephony/status",
+        action=f"{base}/telephony/status",
+        # Record both legs of the call; callback fires when recording is ready
+        record="record-from-answer",
+        recording_status_callback=f"{base}/telephony/recording-status",
+        recording_status_callback_method="POST",
     )
     dial.sip(
         sip_uri,
@@ -249,6 +254,50 @@ async def call_status(
         duration_sec=int(CallDuration),
     )
     return _twiml_response(VoiceResponse())
+
+
+# ---------------------------------------------------------------------------
+# Recording status callback
+# ---------------------------------------------------------------------------
+
+
+@router.post("/recording-status")
+async def recording_status(
+    request: Request,
+    CallSid: str = Form(...),
+    RecordingSid: str = Form(...),
+    RecordingUrl: str = Form(...),
+    RecordingStatus: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Twilio posts here when a call recording is ready.
+    Saves the recording SID and URL to the call record so it can be
+    played back from the admin dashboard.
+    """
+    body = dict(await request.form())
+    validate_twilio_signature(request, body)
+
+    logger.info(
+        "Recording status | CallSid=%s RecordingSid=%s Status=%s",
+        CallSid, RecordingSid, RecordingStatus,
+    )
+
+    if RecordingStatus == "completed":
+        try:
+            await call_service.save_recording(
+                db,
+                twilio_call_sid=CallSid,
+                recording_sid=RecordingSid,
+                recording_url=RecordingUrl,
+            )
+        except Exception:
+            logger.warning(
+                "Could not save recording | CallSid=%s RecordingSid=%s",
+                CallSid, RecordingSid, exc_info=True,
+            )
+
+    return Response(content="<Response/>", media_type="application/xml")
 
 
 # ---------------------------------------------------------------------------

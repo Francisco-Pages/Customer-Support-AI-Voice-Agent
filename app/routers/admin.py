@@ -16,8 +16,10 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
+import httpx
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, status
+from fastapi.responses import StreamingResponse
 from geopy.adapters import AioHTTPAdapter
 from geopy.geocoders import Nominatim
 from openai import AsyncOpenAI
@@ -25,7 +27,7 @@ from pinecone import Pinecone
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent.prompts import INBOUND_SYSTEM_PROMPT
+from agent.prompts import INBOUND_SYSTEM_PROMPT, build_inbound_prompt
 from app.config import settings
 from app.core.security import verify_admin_api_key
 from app.dependencies import get_db, get_redis
@@ -75,6 +77,8 @@ class CallRecord(BaseModel):
     summary: str | None
     transcript: str | None
     safety_event: bool
+    has_recording: bool
+    recording_sid: str | None
 
 
 class CallListResponse(BaseModel):
@@ -136,6 +140,8 @@ def _call_to_record(call) -> CallRecord:
         summary=call.summary,
         transcript=call.transcript,
         safety_event=call.safety_event,
+        has_recording=bool(call.recording_sid),
+        recording_sid=call.recording_sid,
     )
 
 
@@ -376,6 +382,41 @@ async def get_call(call_id: UUID, db: AsyncSession = Depends(get_db)):
     if not call:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found.")
     return _call_to_record(call)
+
+
+@router.get("/calls/{call_id}/recording")
+async def get_call_recording(call_id: UUID, db: AsyncSession = Depends(get_db)):
+    """
+    Proxy the Twilio recording MP3 to the browser.
+
+    Twilio requires HTTP Basic auth to access recordings. This endpoint
+    fetches the audio server-side and streams it so the browser doesn't
+    need to know the Twilio credentials.
+    """
+    call = await call_service.get_by_id(db, call_id)
+    if not call:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call not found.")
+    if not call.recording_url:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No recording available.")
+
+    # Twilio recording URLs end with no extension; append .mp3 for direct playback.
+    url = call.recording_url
+    if not url.endswith(".mp3"):
+        url = url + ".mp3"
+
+    async def _stream():
+        async with httpx.AsyncClient() as client:
+            async with client.stream(
+                "GET",
+                url,
+                auth=(settings.twilio_account_sid, settings.twilio_auth_token),
+                timeout=30,
+            ) as resp:
+                resp.raise_for_status()
+                async for chunk in resp.aiter_bytes(chunk_size=8192):
+                    yield chunk
+
+    return StreamingResponse(_stream(), media_type="audio/mpeg")
 
 
 # ---------------------------------------------------------------------------
@@ -1261,3 +1302,88 @@ async def agent_chat(payload: ChatRequest, db: AsyncSession = Depends(get_db)):
             })
 
     raise HTTPException(status_code=500, detail="Agent did not produce a final reply.")
+
+
+# ---------------------------------------------------------------------------
+# Prompt management
+# ---------------------------------------------------------------------------
+
+_PROMPT_REDIS_KEY = "prompt:inbound"
+
+
+class PromptResponse(BaseModel):
+    prompt: str
+    is_custom: bool   # False = file default, True = stored override
+
+
+class PromptUpdateRequest(BaseModel):
+    prompt: str = Field(..., min_length=1)
+
+
+@router.get("/prompt", response_model=PromptResponse)
+async def get_prompt(redis: aioredis.Redis = Depends(get_redis)):
+    """Return the current inbound system prompt (custom override or file default)."""
+    stored = await redis.get(_PROMPT_REDIS_KEY)
+    if stored:
+        return PromptResponse(prompt=stored, is_custom=True)
+    return PromptResponse(
+        prompt=build_inbound_prompt(settings.linq_from_number),
+        is_custom=False,
+    )
+
+
+@router.put("/prompt", response_model=PromptResponse)
+async def update_prompt(
+    payload: PromptUpdateRequest,
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    """Save a custom inbound system prompt. Takes effect on the next call."""
+    await redis.set(_PROMPT_REDIS_KEY, payload.prompt)
+    return PromptResponse(prompt=payload.prompt, is_custom=True)
+
+
+@router.delete("/prompt", status_code=status.HTTP_204_NO_CONTENT)
+async def reset_prompt(redis: aioredis.Redis = Depends(get_redis)):
+    """Delete the custom prompt override, reverting to the file default."""
+    await redis.delete(_PROMPT_REDIS_KEY)
+
+
+# ---------------------------------------------------------------------------
+# Agent settings (temperature, etc.)
+# ---------------------------------------------------------------------------
+
+_SETTINGS_REDIS_KEY = "agent:settings"
+_DEFAULT_TEMPERATURE = 0.1
+_DEFAULT_VOICE_ID = "EXAVITQu4vr4xnSDxMaL"  # ElevenLabs "Sarah"
+
+
+class AgentSettingsResponse(BaseModel):
+    temperature: float
+    voice_id: str
+
+
+class AgentSettingsUpdateRequest(BaseModel):
+    temperature: float = Field(..., ge=0.0, le=2.0)
+    voice_id: str = Field(..., min_length=1)
+
+
+@router.get("/settings", response_model=AgentSettingsResponse)
+async def get_agent_settings(redis: aioredis.Redis = Depends(get_redis)):
+    """Return current agent settings."""
+    stored = await redis.hgetall(_SETTINGS_REDIS_KEY)
+    temperature = float(stored["temperature"]) if stored.get("temperature") else _DEFAULT_TEMPERATURE
+    voice_id = stored.get("voice_id") or _DEFAULT_VOICE_ID
+    return AgentSettingsResponse(temperature=temperature, voice_id=voice_id)
+
+
+@router.put("/settings", response_model=AgentSettingsResponse)
+async def update_agent_settings(
+    payload: AgentSettingsUpdateRequest,
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    """Update agent settings. Takes effect on the next call."""
+    await redis.hset(_SETTINGS_REDIS_KEY, mapping={
+        "temperature": payload.temperature,
+        "voice_id": payload.voice_id,
+    })
+    return AgentSettingsResponse(temperature=payload.temperature, voice_id=payload.voice_id)

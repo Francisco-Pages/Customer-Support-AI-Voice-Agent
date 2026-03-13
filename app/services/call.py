@@ -100,6 +100,23 @@ async def finalize_call(
     return call
 
 
+async def save_recording(
+    db: AsyncSession,
+    twilio_call_sid: str,
+    recording_sid: str,
+    recording_url: str,
+) -> Call | None:
+    """Persist the Twilio recording SID and URL on the call record."""
+    call = await get_by_sid(db, twilio_call_sid)
+    if not call:
+        logger.warning("save_recording: no call record for SID %s", twilio_call_sid)
+        return None
+    call.recording_sid = recording_sid
+    call.recording_url = recording_url
+    await db.flush()
+    return call
+
+
 async def link_customer(
     db: AsyncSession,
     twilio_call_sid: str,

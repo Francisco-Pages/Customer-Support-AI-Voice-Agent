@@ -92,6 +92,7 @@ def _is_safety_emergency(text: str) -> bool:
     return bool(_SAFETY_RE.search(text))
 
 
+
 # ---------------------------------------------------------------------------
 # Agent class
 # ---------------------------------------------------------------------------
@@ -111,12 +112,12 @@ class HVACAssistant(Agent):
         direction: str = "inbound",
         caller_phone: str | None = None,
         room_name: str | None = None,
+        prompt_override: str | None = None,
     ) -> None:
-        instructions = (
-            build_inbound_prompt(settings.linq_from_number)
-            if direction == "inbound"
-            else OUTBOUND_SYSTEM_PROMPT
-        )
+        if direction == "inbound":
+            instructions = prompt_override or build_inbound_prompt(settings.linq_from_number)
+        else:
+            instructions = OUTBOUND_SYSTEM_PROMPT
         super().__init__(instructions=instructions)
         self._twilio = TwilioClient(
             settings.twilio_account_sid,
@@ -1152,8 +1153,8 @@ async def hvac_agent(ctx: JobContext) -> None:
     # Build the voice pipeline session
     session = AgentSession(
         stt=openai.STT(model="gpt-4o-transcribe"),  # Auto language detection, strong Ukrainian support
-        llm=openai.LLM(model="gpt-4o-mini"),               # Lower latency than gpt-4o
-        tts=elevenlabs.TTS(model="eleven_flash_v2_5", voice_id="EXAVITQu4vr4xnSDxMaL"),  # Fast native multilingual TTS, 32 languages incl. Ukrainian
+        llm=openai.LLM(model="gpt-4o-mini", temperature=_temperature),       # Lower latency than gpt-4o
+        tts=elevenlabs.TTS(model="eleven_flash_v2_5", voice_id=_voice_id),  # Fast native multilingual TTS, 32 languages incl. Ukrainian
         vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
     )
@@ -1197,7 +1198,33 @@ async def hvac_agent(ctx: JobContext) -> None:
     # For regular WebRTC participants (e.g. playground testing), use BVC.
     # ------------------------------------------------------------------
 
-    agent = HVACAssistant(direction=direction, caller_phone=caller_phone, room_name=ctx.room.name)
+    # Load runtime settings from Redis (set via admin dashboard).
+    _prompt_override: str | None = None
+    _temperature: float = 0.1
+    _voice_id: str = "EXAVITQu4vr4xnSDxMaL"
+    if direction == "inbound":
+        try:
+            _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+            _prompt_override = await _redis.get("prompt:inbound")
+            _stored = await _redis.hgetall("agent:settings")
+            await _redis.aclose()
+            if _prompt_override:
+                logger.info("Using custom prompt from Redis (%d chars)", len(_prompt_override))
+            if _stored.get("temperature"):
+                _temperature = float(_stored["temperature"])
+                logger.info("LLM temperature from Redis: %s", _temperature)
+            if _stored.get("voice_id"):
+                _voice_id = _stored["voice_id"]
+                logger.info("TTS voice_id from Redis: %s", _voice_id)
+        except Exception as _exc:
+            logger.warning("Could not read settings from Redis: %s", _exc)
+
+    agent = HVACAssistant(
+        direction=direction,
+        caller_phone=caller_phone,
+        room_name=ctx.room.name,
+        prompt_override=_prompt_override,
+    )
     await session.start(
         room=ctx.room,
         agent=agent,

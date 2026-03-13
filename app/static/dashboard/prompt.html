@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HVAC Admin — Agent Prompt</title>
+  <link rel="stylesheet" href="/dashboard/style.css" />
+  <style>
+    .prompt-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .prompt-meta {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 13px;
+      color: var(--text-muted, #888);
+    }
+    .prompt-meta .badge-custom  { background: #d1fae5; color: #065f46; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+    .prompt-meta .badge-default { background: #e0e7ff; color: #3730a3; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+    #promptEditor {
+      width: 100%;
+      min-height: 600px;
+      font-family: 'Menlo', 'Consolas', monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      padding: 16px;
+      border: 1px solid var(--border, #e5e7eb);
+      border-radius: 6px;
+      background: #fafafa;
+      color: #111;
+      resize: vertical;
+      box-sizing: border-box;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    #promptEditor:focus { border-color: #6366f1; background: #fff; }
+    .prompt-actions {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+    .btn-save   { background: #6366f1; color: #fff; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 600; }
+    .btn-save:hover   { background: #4f46e5; }
+    .btn-reset  { background: transparent; color: #ef4444; border: 1px solid #ef4444; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 14px; }
+    .btn-reset:hover  { background: #fef2f2; }
+    #charCount  { margin-left: auto; font-size: 13px; color: var(--text-muted, #888); }
+    #statusMsg  { font-size: 13px; height: 18px; }
+    #statusMsg.ok  { color: #059669; }
+    #statusMsg.err { color: #dc2626; }
+  </style>
+</head>
+<body>
+  <script src="/dashboard/app.js"></script>
+  <script>
+    if (!getKey()) { /* redirected */ }
+    renderNav('prompt');
+  </script>
+
+  <div class="page">
+    <div class="page-header">
+      <span class="page-title">Agent Prompt</span>
+      <span class="page-subtitle">Changes take effect on the next incoming call.</span>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Inbound System Prompt</span>
+        <span id="promptBadge"></span>
+      </div>
+
+      <div class="prompt-wrap">
+        <textarea id="promptEditor" spellcheck="false" oninput="onEdit()">Loading…</textarea>
+
+        <div class="prompt-actions">
+          <button class="btn-save" onclick="savePrompt()">Save</button>
+          <button class="btn-reset" onclick="resetPrompt()">Reset to default</button>
+          <span id="charCount">— chars</span>
+        </div>
+
+        <div id="statusMsg"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let originalText = '';
+
+    function onEdit() {
+      const len = document.getElementById('promptEditor').value.length;
+      document.getElementById('charCount').textContent = len.toLocaleString() + ' chars';
+      setStatus('');
+    }
+
+    function setStatus(msg, isErr = false) {
+      const el = document.getElementById('statusMsg');
+      el.textContent = msg;
+      el.className = msg ? (isErr ? 'err' : 'ok') : '';
+    }
+
+    function setBadge(isCustom) {
+      const el = document.getElementById('promptBadge');
+      el.innerHTML = isCustom
+        ? '<span class="badge-custom">Custom</span>'
+        : '<span class="badge-default">Default</span>';
+    }
+
+    async function loadPrompt() {
+      try {
+        const data = await apiFetch('/admin/prompt');
+        if (!data) return;
+        originalText = data.prompt;
+        document.getElementById('promptEditor').value = data.prompt;
+        document.getElementById('charCount').textContent =
+          data.prompt.length.toLocaleString() + ' chars';
+        setBadge(data.is_custom);
+      } catch (err) {
+        setStatus('Failed to load prompt: ' + err.message, true);
+      }
+    }
+
+    async function savePrompt() {
+      const text = document.getElementById('promptEditor').value.trim();
+      if (!text) { setStatus('Prompt cannot be empty.', true); return; }
+      try {
+        const data = await apiJson('/admin/prompt', { prompt: text }, 'PUT');
+        if (!data) return;
+        originalText = data.prompt;
+        setBadge(true);
+        setStatus('Saved. Takes effect on the next call.');
+      } catch (err) {
+        setStatus('Save failed: ' + err.message, true);
+      }
+    }
+
+    async function resetPrompt() {
+      if (!confirm('Reset to the default prompt? Your custom edits will be lost.')) return;
+      try {
+        const key = getKey();
+        const res = await fetch(new URL('/admin/prompt', window.location.origin).toString(), {
+          method: 'DELETE',
+          headers: { 'X-Api-Key': key },
+        });
+        if (!res.ok) throw new Error('Reset failed');
+        await loadPrompt();
+        setStatus('Reset to default.');
+      } catch (err) {
+        setStatus('Reset failed: ' + err.message, true);
+      }
+    }
+
+    loadPrompt();
+  </script>
+</body>
+</html>
