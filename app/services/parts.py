@@ -37,6 +37,8 @@ async def lookup_parts(
             Part.part_name,
             Part.part_type,
             Part.brand,
+            Part.dp,
+            Part.ndp,
             PartCompatibility.product_model.label("matched_model"),
             similarity_expr.label("similarity"),
         )
@@ -62,8 +64,26 @@ async def lookup_parts(
             "part_name": r.part_name,
             "part_type": r.part_type,
             "brand": r.brand,
+            "dp": float(r.dp) if r.dp is not None else None,
+            "ndp": float(r.ndp) if r.ndp is not None else None,
             "matched_model": r.matched_model,
             "similarity": round(r.similarity, 2),
         }
         for r in rows
     ]
+
+
+async def get_part_by_number(db: AsyncSession, part_number: str) -> dict | None:
+    """Look up a single part directly by its exact part number."""
+    result = await db.execute(select(Part).where(Part.part_number == part_number))
+    part = result.scalar_one_or_none()
+    if not part:
+        return None
+    return {
+        "part_number": part.part_number,
+        "part_name": part.part_name,
+        "part_type": part.part_type,
+        "brand": part.brand,
+        "dp": float(part.dp) if part.dp is not None else None,
+        "ndp": float(part.ndp) if part.ndp is not None else None,
+    }

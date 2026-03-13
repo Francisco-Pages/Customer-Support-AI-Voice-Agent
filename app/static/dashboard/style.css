@@ -28,49 +28,79 @@ body {
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
-/* ===== Nav ===== */
-.nav {
+/* ===== Sidebar ===== */
+.sidebar {
+  position: fixed;
+  left: 0; top: 0; bottom: 0;
+  width: 220px;
   background: var(--surface);
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  padding: 0 24px;
-  height: 52px;
-  gap: 8px;
+  border-right: 1px solid var(--border);
   box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  z-index: 50;
+  overflow-y: auto;
 }
 
-.nav-brand {
+.sidebar-brand {
+  padding: 20px 20px 18px;
   font-weight: 700;
   font-size: 15px;
   color: var(--text);
-  margin-right: 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  letter-spacing: -0.01em;
 }
 
-.nav-link {
-  padding: 6px 14px;
-  border-radius: 6px;
+.sidebar-nav {
+  flex: 1;
+  padding: 10px 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-section {
+  padding: 14px 20px 4px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.sidebar-link {
+  display: block;
+  padding: 8px 20px;
   color: var(--muted);
   font-weight: 500;
-  transition: background 0.15s, color 0.15s;
+  font-size: 14px;
+  border-left: 3px solid transparent;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.sidebar-link:hover { background: var(--bg); color: var(--text); text-decoration: none; }
+.sidebar-link.active { background: #eef1fe; color: var(--accent); border-left-color: var(--accent); font-weight: 600; }
+
+.sidebar-footer {
+  padding: 14px 16px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
 }
 
-.nav-link:hover { background: var(--bg); color: var(--text); text-decoration: none; }
-.nav-link.active { background: #eef1fe; color: var(--accent); }
-
-.nav-spacer { flex: 1; }
-
-.nav-logout {
-  padding: 6px 12px;
+.sidebar-signout {
+  width: 100%;
+  padding: 7px 12px;
   border-radius: 6px;
   background: none;
   border: 1px solid var(--border);
   color: var(--muted);
   cursor: pointer;
   font-size: 13px;
+  text-align: center;
   transition: background 0.15s;
 }
-.nav-logout:hover { background: var(--bg); }
+.sidebar-signout:hover { background: var(--bg); }
+
+body.has-sidebar { margin-left: 220px; }
 
 /* ===== Layout ===== */
 .page { max-width: 1200px; margin: 0 auto; padding: 28px 24px; }

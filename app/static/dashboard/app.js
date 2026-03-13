@@ -91,22 +91,33 @@ async function apiUpload(path, formData) {
 /* ===== Nav ===== */
 
 function renderNav(active) {
-  const nav = document.createElement('nav');
-  nav.className = 'nav';
-  nav.innerHTML = `
-    <span class="nav-brand">HVAC Admin</span>
-    <a href="/dashboard/index.html" class="nav-link ${active === 'overview' ? 'active' : ''}">Overview</a>
-    <a href="/dashboard/calls.html" class="nav-link ${active === 'calls' ? 'active' : ''}">Call Log</a>
-    <a href="/dashboard/customers.html" class="nav-link ${active === 'customers' ? 'active' : ''}">Customers</a>
-    <a href="/dashboard/knowledge.html" class="nav-link ${active === 'knowledge' ? 'active' : ''}">Knowledge Base</a>
-    <a href="/dashboard/locations.html" class="nav-link ${active === 'locations' ? 'active' : ''}">Service Directory</a>
-    <a href="/dashboard/chat.html" class="nav-link ${active === 'chat' ? 'active' : ''}">Agent Chat</a>
-    <a href="/dashboard/prompt.html" class="nav-link ${active === 'prompt' ? 'active' : ''}">Prompt</a>
-    <a href="/dashboard/settings.html" class="nav-link ${active === 'settings' ? 'active' : ''}">Settings</a>
-    <span class="nav-spacer"></span>
-    <button class="nav-logout" onclick="logout()">Sign out</button>
+  document.body.classList.add('has-sidebar');
+  const sidebar = document.createElement('aside');
+  sidebar.className = 'sidebar';
+  sidebar.innerHTML = `
+    <div class="sidebar-brand">HVAC Admin</div>
+    <nav class="sidebar-nav">
+      <a href="/dashboard/index.html" class="sidebar-link ${active === 'overview' ? 'active' : ''}">Overview</a>
+
+      <div class="sidebar-section">Calls</div>
+      <a href="/dashboard/calls.html" class="sidebar-link ${active === 'calls' ? 'active' : ''}">Call Log</a>
+      <a href="/dashboard/metrics.html" class="sidebar-link ${active === 'metrics' ? 'active' : ''}">Metrics</a>
+
+      <div class="sidebar-section">Customers</div>
+      <a href="/dashboard/customers.html" class="sidebar-link ${active === 'customers' ? 'active' : ''}">Customers</a>
+
+      <div class="sidebar-section">Agent</div>
+      <a href="/dashboard/knowledge.html" class="sidebar-link ${active === 'knowledge' ? 'active' : ''}">Knowledge Base</a>
+      <a href="/dashboard/locations.html" class="sidebar-link ${active === 'locations' ? 'active' : ''}">Service Directory</a>
+      <a href="/dashboard/chat.html" class="sidebar-link ${active === 'chat' ? 'active' : ''}">Chat</a>
+      <a href="/dashboard/prompt.html" class="sidebar-link ${active === 'prompt' ? 'active' : ''}">Prompt</a>
+      <a href="/dashboard/settings.html" class="sidebar-link ${active === 'settings' ? 'active' : ''}">Settings</a>
+    </nav>
+    <div class="sidebar-footer">
+      <button class="sidebar-signout" onclick="logout()">Sign out</button>
+    </div>
   `;
-  document.body.prepend(nav);
+  document.body.prepend(sidebar);
 }
 
 function logout() {

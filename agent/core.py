@@ -533,20 +533,49 @@ class HVACAssistant(Agent):
                 seen.add(m["part_number"])
                 unique.append(m)
 
+        def _price_str(m: dict) -> str:
+            if m.get("dp") is not None and m.get("ndp") is not None:
+                return f" | DP: ${m['dp']:.2f}, NDP: ${m['ndp']:.2f}"
+            if m.get("ndp") is not None:
+                return f" | Price: ${m['ndp']:.2f}"
+            return ""
+
         if len(unique) == 1:
             m = unique[0]
             return (
                 f"The replacement {m['part_type']} ({m['part_name']}) "
                 f"for {m['brand']} model '{product_model}' "
-                f"has part number {m['part_number']}."
+                f"has part number {m['part_number']}{_price_str(m)}."
             )
 
         lines = [
             f"Found {len(unique)} compatible parts for '{product_model}':"
         ]
         for m in unique:
-            lines.append(f"  • {m['part_number']} — {m['part_name']} ({m['part_type']}, {m['brand']})")
+            lines.append(f"  • {m['part_number']} — {m['part_name']} ({m['part_type']}, {m['brand']}){_price_str(m)}")
         return "\n".join(lines)
+
+    @function_tool
+    async def get_part_by_number(
+        self,
+        part_number: Annotated[str, "The exact part number to look up, e.g. '11103020000179'"],
+    ) -> str:
+        """
+        Look up a part's name, type, and pricing directly by its part number.
+        Use this when the caller already has a part number and wants to know
+        the price, description, or other details.
+        """
+        async with AsyncSessionLocal() as db:
+            part = await parts_service.get_part_by_number(db, part_number)
+
+        if not part:
+            return f"Part number '{part_number}' was not found in our catalog."
+
+        price = _price_str(part)
+        return (
+            f"Part {part['part_number']}: {part['part_name']} "
+            f"({part['part_type']}, {part['brand']}){price}."
+        )
 
     # ------------------------------------------------------------------
     # Function tools — appointments

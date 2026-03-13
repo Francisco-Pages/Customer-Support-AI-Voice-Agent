@@ -11,8 +11,9 @@ import asyncio
 import json
 import logging
 import math
+import statistics
 import uuid
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated
 from uuid import UUID
 
@@ -25,11 +26,13 @@ from geopy.geocoders import Nominatim
 from openai import AsyncOpenAI
 from pinecone import Pinecone
 from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent.prompts import INBOUND_SYSTEM_PROMPT, build_inbound_prompt
 from app.config import settings
 from app.core.security import verify_admin_api_key
+from app.db.models import Appointment, Call, Customer
 from app.dependencies import get_db, get_redis
 from app.rag.ingestor import delete_document, ingest_document
 from app.services import call as call_service
@@ -303,6 +306,235 @@ async def get_stats(
         safety_events_today=today.safety_events_today,
         avg_duration_today=today.avg_duration_today,
         recent_calls=[_call_to_record(c) for c in recent],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Metrics
+# ---------------------------------------------------------------------------
+
+
+class MetricsResponse(BaseModel):
+    period_days: int
+    date_from: str
+    date_to: str
+
+    total_calls: int
+    inbound_calls: int
+    outbound_calls: int
+    calls_per_day: list[dict]
+
+    resolution_counts: dict
+    containment_rate: float
+    transfer_rate: float
+    abandonment_rate: float
+
+    avg_duration_sec: float | None
+    median_duration_sec: float | None
+    duration_buckets: list[dict]
+
+    safety_event_count: int
+    safety_event_rate: float
+
+    new_customers: int
+    returning_callers: int
+    caller_type_counts: dict
+
+    appointments_booked: int
+    booking_rate: float
+    appointment_type_counts: dict
+    appointment_status_counts: dict
+
+    calls_with_recording: int
+    calls_with_transcript: int
+    recording_rate: float
+    transcript_rate: float
+
+
+@router.get("/metrics", response_model=MetricsResponse)
+async def get_metrics(
+    period: Annotated[str, Query(pattern="^(7d|30d|90d)$")] = "30d",
+    db: AsyncSession = Depends(get_db),
+):
+    period_days = int(period.rstrip("d"))
+    now = datetime.now(timezone.utc)
+    date_from = now - timedelta(days=period_days)
+    date_to = now
+
+    # --- Call volume ---
+    total_q = await db.execute(
+        select(func.count()).where(Call.started_at >= date_from)
+    )
+    total_calls = total_q.scalar_one()
+
+    inbound_q = await db.execute(
+        select(func.count()).where(Call.started_at >= date_from, Call.direction == "inbound")
+    )
+    inbound_calls = inbound_q.scalar_one()
+
+    outbound_calls = total_calls - inbound_calls
+
+    cpd_q = await db.execute(
+        select(func.date(Call.started_at).label("d"), func.count().label("cnt"))
+        .where(Call.started_at >= date_from)
+        .group_by(func.date(Call.started_at))
+        .order_by(func.date(Call.started_at))
+    )
+    calls_per_day = [{"date": str(row.d), "count": row.cnt} for row in cpd_q.all()]
+
+    # --- Resolution ---
+    res_q = await db.execute(
+        select(Call.resolution, func.count().label("cnt"))
+        .where(Call.started_at >= date_from)
+        .group_by(Call.resolution)
+    )
+    resolution_counts: dict = {}
+    for row in res_q.all():
+        key = row.resolution if row.resolution else "unknown"
+        resolution_counts[key] = row.cnt
+
+    resolved = resolution_counts.get("resolved", 0)
+    transferred = resolution_counts.get("transferred", 0) + resolution_counts.get("escalated", 0)
+    abandoned = resolution_counts.get("abandoned", 0)
+    containment_rate = (resolved / total_calls * 100) if total_calls else 0.0
+    transfer_rate = (transferred / total_calls * 100) if total_calls else 0.0
+    abandonment_rate = (abandoned / total_calls * 100) if total_calls else 0.0
+
+    # --- Duration ---
+    dur_q = await db.execute(
+        select(func.avg(Call.duration_sec).label("avg_dur"))
+        .where(Call.started_at >= date_from, Call.duration_sec.isnot(None))
+    )
+    avg_dur_row = dur_q.one()
+    avg_duration_sec = float(avg_dur_row.avg_dur) if avg_dur_row.avg_dur is not None else None
+
+    all_dur_q = await db.execute(
+        select(Call.duration_sec).where(Call.started_at >= date_from, Call.duration_sec.isnot(None))
+    )
+    all_durations = [row[0] for row in all_dur_q.all()]
+    median_duration_sec = statistics.median(all_durations) if all_durations else None
+
+    bucket_thresholds = [(60, "<1m"), (180, "1–3m"), (300, "3–5m"), (600, "5–10m")]
+    duration_buckets_map: dict[str, int] = {"<1m": 0, "1–3m": 0, "3–5m": 0, "5–10m": 0, ">10m": 0}
+    for d in all_durations:
+        if d < 60:
+            duration_buckets_map["<1m"] += 1
+        elif d < 180:
+            duration_buckets_map["1–3m"] += 1
+        elif d < 300:
+            duration_buckets_map["3–5m"] += 1
+        elif d < 600:
+            duration_buckets_map["5–10m"] += 1
+        else:
+            duration_buckets_map[">10m"] += 1
+    duration_buckets = [{"label": k, "count": v} for k, v in duration_buckets_map.items()]
+
+    # --- Safety ---
+    safety_q = await db.execute(
+        select(func.count()).where(Call.started_at >= date_from, Call.safety_event.is_(True))
+    )
+    safety_event_count = safety_q.scalar_one()
+    safety_event_rate = (safety_event_count / total_calls * 100) if total_calls else 0.0
+
+    # --- Customers ---
+    new_cust_q = await db.execute(
+        select(func.count()).where(Customer.created_at >= date_from)
+    )
+    new_customers = new_cust_q.scalar_one()
+
+    returning_sub = (
+        select(Call.caller_phone)
+        .where(Call.started_at < date_from, Call.caller_phone.isnot(None))
+        .distinct()
+        .scalar_subquery()
+    )
+    returning_q = await db.execute(
+        select(func.count())
+        .where(Call.started_at >= date_from, Call.caller_phone.in_(returning_sub))
+    )
+    returning_callers = returning_q.scalar_one()
+
+    ct_q = await db.execute(
+        select(Customer.caller_type, func.count().label("cnt"))
+        .join(Call, Call.customer_id == Customer.id)
+        .where(Call.started_at >= date_from)
+        .group_by(Customer.caller_type)
+    )
+    caller_type_counts: dict = {}
+    for row in ct_q.all():
+        key = row.caller_type if row.caller_type else "unknown"
+        caller_type_counts[key] = caller_type_counts.get(key, 0) + row.cnt
+
+    no_cust_q = await db.execute(
+        select(func.count()).where(Call.started_at >= date_from, Call.customer_id.is_(None))
+    )
+    no_cust_count = no_cust_q.scalar_one()
+    if no_cust_count:
+        caller_type_counts["unknown"] = caller_type_counts.get("unknown", 0) + no_cust_count
+
+    # --- Appointments ---
+    appt_q = await db.execute(
+        select(func.count()).where(Appointment.created_at >= date_from)
+    )
+    appointments_booked = appt_q.scalar_one()
+    booking_rate = (appointments_booked / total_calls * 100) if total_calls else 0.0
+
+    appt_type_q = await db.execute(
+        select(Appointment.appointment_type, func.count().label("cnt"))
+        .where(Appointment.created_at >= date_from)
+        .group_by(Appointment.appointment_type)
+    )
+    appointment_type_counts = {row.appointment_type: row.cnt for row in appt_type_q.all()}
+
+    appt_status_q = await db.execute(
+        select(Appointment.status, func.count().label("cnt"))
+        .where(Appointment.created_at >= date_from)
+        .group_by(Appointment.status)
+    )
+    appointment_status_counts = {row.status: row.cnt for row in appt_status_q.all()}
+
+    # --- Quality ---
+    rec_q = await db.execute(
+        select(func.count()).where(Call.started_at >= date_from, Call.recording_sid.isnot(None))
+    )
+    calls_with_recording = rec_q.scalar_one()
+
+    trans_q = await db.execute(
+        select(func.count()).where(Call.started_at >= date_from, Call.transcript.isnot(None))
+    )
+    calls_with_transcript = trans_q.scalar_one()
+
+    recording_rate = (calls_with_recording / total_calls * 100) if total_calls else 0.0
+    transcript_rate = (calls_with_transcript / total_calls * 100) if total_calls else 0.0
+
+    return MetricsResponse(
+        period_days=period_days,
+        date_from=date_from.isoformat(),
+        date_to=date_to.isoformat(),
+        total_calls=total_calls,
+        inbound_calls=inbound_calls,
+        outbound_calls=outbound_calls,
+        calls_per_day=calls_per_day,
+        resolution_counts=resolution_counts,
+        containment_rate=round(containment_rate, 1),
+        transfer_rate=round(transfer_rate, 1),
+        abandonment_rate=round(abandonment_rate, 1),
+        avg_duration_sec=round(avg_duration_sec, 1) if avg_duration_sec is not None else None,
+        median_duration_sec=round(float(median_duration_sec), 1) if median_duration_sec is not None else None,
+        duration_buckets=duration_buckets,
+        safety_event_count=safety_event_count,
+        safety_event_rate=round(safety_event_rate, 1),
+        new_customers=new_customers,
+        returning_callers=returning_callers,
+        caller_type_counts=caller_type_counts,
+        appointments_booked=appointments_booked,
+        booking_rate=round(booking_rate, 1),
+        appointment_type_counts=appointment_type_counts,
+        appointment_status_counts=appointment_status_counts,
+        calls_with_recording=calls_with_recording,
+        calls_with_transcript=calls_with_transcript,
+        recording_rate=round(recording_rate, 1),
+        transcript_rate=round(transcript_rate, 1),
     )
 
 
@@ -1136,11 +1368,32 @@ _CHAT_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_part_by_number",
+            "description": "Look up a part's name, type, brand, and pricing by its exact part number.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "part_number": {"type": "string", "description": "The exact part number, e.g. '11103020000179'"},
+                },
+                "required": ["part_number"],
+            },
+        },
+    },
 ]
 
 
 async def _execute_tool(name: str, args: dict, db: AsyncSession) -> str:
     """Dispatch a tool call to the real service layer and return a string result."""
+    def _fmt_price(m: dict) -> str:
+        if m.get("dp") is not None and m.get("ndp") is not None:
+            return f" | DP: ${m['dp']:.2f}, NDP: ${m['ndp']:.2f}"
+        if m.get("ndp") is not None:
+            return f" | Price: ${m['ndp']:.2f}"
+        return ""
+
     if name == "check_parts_availability":
         matches = await parts_service.lookup_parts(
             db,
@@ -1158,8 +1411,18 @@ async def _execute_tool(name: str, args: dict, db: AsyncSession) -> str:
                 lines.append(
                     f"Part number: {m['part_number']} — {m['part_name']} "
                     f"({m['part_type']}, {m['brand']}) matched model: {m['matched_model']}"
+                    f"{_fmt_price(m)}"
                 )
         return "\n".join(lines)
+
+    if name == "get_part_by_number":
+        part = await parts_service.get_part_by_number(db, args["part_number"])
+        if not part:
+            return f"Part number '{args['part_number']}' was not found in the catalog."
+        return (
+            f"Part {part['part_number']}: {part['part_name']} "
+            f"({part['part_type']}, {part['brand']}){_fmt_price(part)}"
+        )
 
     if name == "lookup_customer":
         customer = await customer_service.get_by_phone_with_products(db, args["phone"])

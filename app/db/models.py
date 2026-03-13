@@ -18,6 +18,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    Numeric,
     String,
     Text,
     func,
@@ -270,6 +271,9 @@ class Part(Base):
         String(100), unique=True, nullable=False, index=True
     )
     brand: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Distributor price and non-distributor price (USD)
+    dp: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    ndp: Mapped[float | None] = mapped_column(Numeric(10, 2))
 
     compatible_models: Mapped[list["PartCompatibility"]] = relationship(
         back_populates="part", cascade="all, delete-orphan"
