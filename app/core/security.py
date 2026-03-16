@@ -1,4 +1,4 @@
-from fastapi import HTTPException, Header, Request, status
+from fastapi import HTTPException, Header, Query, Request, status
 from twilio.request_validator import RequestValidator
 
 from app.config import settings
@@ -27,14 +27,19 @@ def validate_twilio_signature(request: Request, body: dict) -> None:
         )
 
 
-def verify_admin_api_key(x_api_key: str = Header(...)) -> str:
+def verify_admin_api_key(
+    x_api_key: str | None = Header(default=None),
+    token: str | None = Query(default=None),
+) -> str:
     """
     Validates the API key for admin endpoints.
-    Expects the key in the X-Api-Key request header.
+    Accepts the key via X-Api-Key header (normal API calls) or
+    ?token= query param (browser-native elements like <audio src="...">).
     """
-    if x_api_key != settings.admin_api_key:
+    key = x_api_key or token
+    if key != settings.admin_api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API key.",
         )
-    return x_api_key
+    return key

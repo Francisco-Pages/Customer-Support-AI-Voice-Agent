@@ -199,7 +199,7 @@
       const recSection = document.getElementById('recordingSection');
       const audio = document.getElementById('modalAudio');
       if (call.has_recording) {
-        audio.src = `/admin/calls/${call.id}/recording`;
+        audio.src = `/admin/calls/${call.id}/recording?token=${encodeURIComponent(getKey())}`;
         audio.load();
         recSection.style.display = '';
       } else {

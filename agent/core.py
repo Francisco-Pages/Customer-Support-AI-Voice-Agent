@@ -51,7 +51,7 @@ from agent.prompts import build_inbound_prompt, OUTBOUND_SYSTEM_PROMPT
 from app.config import settings
 from app.db.models import CustomerProduct
 from app.dependencies import AsyncSessionLocal
-from app.rag.retriever import retrieve
+from app.rag.retriever import retrieve, _index as _rag_index, _oai as _rag_oai
 from app.services import appointment as appointment_service
 from app.services import call as call_service
 from app.services import customer as customer_service
@@ -130,6 +130,8 @@ class HVACAssistant(Agent):
         self._session_ref: AgentSession | None = None  # Set by hvac_agent() after start
         self._customer_context: str | None = None  # Pre-loaded on on_enter for first-turn injection
         self._customer_context_injected: bool = False
+        self._user_end_timestamps: list[datetime] = []    # VAD end-of-speech, one per user turn
+        self._agent_start_timestamps: list[datetime] = [] # TTS audio start, one per agent turn
 
     # ------------------------------------------------------------------
     # Session lifecycle hooks
@@ -254,15 +256,26 @@ class HVACAssistant(Agent):
         RAG context injections.
         """
         lines = []
+        user_idx = 0
+        agent_idx = 0
         for msg in self.session.history.messages():
-            ts = datetime.fromtimestamp(msg.created_at, tz=timezone.utc).strftime("%H:%M:%S")
             if msg.role == "user":
                 text = msg.text_content
                 if text:
+                    if user_idx < len(self._user_end_timestamps):
+                        ts = self._user_end_timestamps[user_idx].strftime("%H:%M:%S")
+                    else:
+                        ts = datetime.fromtimestamp(msg.created_at, tz=timezone.utc).strftime("%H:%M:%S")
+                    user_idx += 1
                     lines.append(f"[{ts}] Customer: {text}")
             elif msg.role == "assistant":
                 text = msg.text_content
                 if text:
+                    if agent_idx < len(self._agent_start_timestamps):
+                        ts = self._agent_start_timestamps[agent_idx].strftime("%H:%M:%S")
+                    else:
+                        ts = datetime.fromtimestamp(msg.created_at, tz=timezone.utc).strftime("%H:%M:%S")
+                    agent_idx += 1
                     lines.append(f"[{ts}] Alex: {text}")
         return "\n".join(lines)
 
@@ -1185,6 +1198,13 @@ async def hvac_agent(ctx: JobContext) -> None:
     """
     logger.info("Agent session starting | room=%s", ctx.room.name)
 
+    # Pre-warm RAG clients so the first caller doesn't pay connection setup cost.
+    try:
+        _rag_index()
+        _rag_oai()
+    except Exception:
+        logger.warning("RAG client pre-warm failed", exc_info=True)
+
     # Determine call direction from job metadata (defaults to inbound)
     direction = "inbound"
     if ctx.job.metadata:
@@ -1227,7 +1247,7 @@ async def hvac_agent(ctx: JobContext) -> None:
 
     # Build the voice pipeline session
     session = AgentSession(
-        stt=openai.STT(model="gpt-4o-transcribe"),  # Auto language detection, strong Ukrainian support
+        stt=deepgram.STT(model="nova-2-general", language="multi"),  # Streaming STT — lower latency; "multi" enables multilingual without detect_language
         llm=openai.LLM(model="gpt-4o-mini", temperature=_temperature),       # Lower latency than gpt-4o
         tts=elevenlabs.TTS(model="eleven_flash_v2_5", voice_id=_voice_id),  # Fast native multilingual TTS, 32 languages incl. Ukrainian
         vad=silero.VAD.load(),
@@ -1239,6 +1259,14 @@ async def hvac_agent(ctx: JobContext) -> None:
     # processes it. If an emergency keyword is detected, cancel the
     # current LLM turn and deliver the hardcoded emergency response.
     # ------------------------------------------------------------------
+
+    @session.on("user_stopped_speaking")
+    def on_user_stopped_speaking() -> None:
+        agent._user_end_timestamps.append(datetime.now(timezone.utc))
+
+    @session.on("agent_started_speaking")
+    def on_agent_started_speaking() -> None:
+        agent._agent_start_timestamps.append(datetime.now(timezone.utc))
 
     @session.on("user_input_transcribed")
     def on_transcript(ev) -> None:
