@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HVAC Admin — Deletion Requests</title>
+  <link rel="stylesheet" href="/dashboard/style.css" />
+</head>
+<body>
+  <script src="/dashboard/app.js"></script>
+  <script>
+    if (!getKey()) { /* redirected */ }
+    renderNav('deletion-requests');
+  </script>
+
+  <div class="page">
+    <div class="page-header">
+      <span class="page-title">Data Deletion Requests</span>
+      <span class="page-subtitle" id="requestCount"></span>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Pending Requests</span>
+        <button class="refresh-btn" style="margin-left: auto;" onclick="loadRequests()">↻ Refresh</button>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Phone</th>
+            <th>Name</th>
+            <th>Email</th>
+            <th>Requested At</th>
+            <th style="width: 160px;"></th>
+          </tr>
+        </thead>
+        <tbody id="requestsBody">
+          <tr class="loading-row"><td colspan="5">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Confirm modal -->
+  <div class="modal-overlay" id="confirmModal" onclick="closeModal()">
+    <div class="modal" onclick="event.stopPropagation()" style="max-width: 480px;">
+      <div class="modal-header">
+        <span class="modal-title" id="modalTitle">Process Deletion Request</span>
+        <button class="modal-close" onclick="closeModal()">&#x2715;</button>
+      </div>
+      <div class="modal-body">
+        <p id="modalBody" style="margin-bottom: 20px; color: var(--muted); font-size: 13px; line-height: 1.6;"></p>
+        <div style="display: flex; gap: 10px; justify-content: flex-end;">
+          <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+          <button class="btn btn-danger" id="modalConfirmBtn" onclick="confirmAction()">Confirm</button>
+        </div>
+        <div class="upload-status" id="modalStatus" style="display:none; margin-top: 14px;"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let pendingAction = null; // { type: 'delete'|'dismiss', customerId, label }
+
+    function escHtml(str) {
+      return String(str ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function showStatus(id, type, html) {
+      const el = document.getElementById(id);
+      el.className = `upload-status status-${type}`;
+      el.innerHTML = html;
+      el.style.display = 'block';
+    }
+
+    async function loadRequests() {
+      const tbody = document.getElementById('requestsBody');
+      tbody.innerHTML = '<tr class="loading-row"><td colspan="5">Loading…</td></tr>';
+      try {
+        const data = await apiFetch('/admin/customers/deletion-requests');
+        if (!data) return;
+
+        document.getElementById('requestCount').textContent =
+          data.total === 0 ? 'No pending requests' : `${data.total} pending`;
+
+        if (data.items.length === 0) {
+          tbody.innerHTML = '<tr class="empty-row"><td colspan="5">No pending deletion requests.</td></tr>';
+          return;
+        }
+
+        tbody.innerHTML = data.items.map(r => `
+          <tr>
+            <td style="font-family: monospace; font-size: 12px;">${escHtml(r.phone)}</td>
+            <td>${escHtml(r.name)}</td>
+            <td class="td-muted">${escHtml(r.email)}</td>
+            <td class="td-muted">${fmtDate(r.requested_at)}</td>
+            <td style="white-space: nowrap;">
+              <button class="btn btn-danger" style="padding: 4px 10px; font-size: 12px; margin-right: 4px;"
+                      onclick="openModal('delete', '${escHtml(r.customer_id)}', '${escHtml(r.name || r.phone)}')">Delete data</button>
+              <button class="btn btn-ghost" style="padding: 4px 10px; font-size: 12px;"
+                      onclick="openModal('dismiss', '${escHtml(r.customer_id)}', '${escHtml(r.name || r.phone)}')">Dismiss</button>
+            </td>
+          </tr>
+        `).join('');
+      } catch (err) {
+        tbody.innerHTML = `<tr class="empty-row"><td colspan="5">Error: ${escHtml(err.message)}</td></tr>`;
+      }
+    }
+
+    function openModal(type, customerId, label) {
+      pendingAction = { type, customerId, label };
+      document.getElementById('modalStatus').style.display = 'none';
+
+      if (type === 'delete') {
+        document.getElementById('modalTitle').textContent = 'Delete Customer Data';
+        document.getElementById('modalBody').innerHTML =
+          `Permanently delete all data for <strong>${escHtml(label)}</strong>? ` +
+          `This removes their account, registered products, call history, and appointments.`;
+        document.getElementById('modalConfirmBtn').textContent = 'Delete data';
+        document.getElementById('modalConfirmBtn').className = 'btn btn-danger';
+      } else {
+        document.getElementById('modalTitle').textContent = 'Dismiss Request';
+        document.getElementById('modalBody').innerHTML =
+          `Mark the deletion request for <strong>${escHtml(label)}</strong> as processed without deleting their data?`;
+        document.getElementById('modalConfirmBtn').textContent = 'Dismiss';
+        document.getElementById('modalConfirmBtn').className = 'btn btn-ghost';
+      }
+
+      document.getElementById('confirmModal').classList.add('open');
+    }
+
+    function closeModal() {
+      pendingAction = null;
+      document.getElementById('confirmModal').classList.remove('open');
+    }
+
+    async function confirmAction() {
+      if (!pendingAction) return;
+      const { type, customerId } = pendingAction;
+      showStatus('modalStatus', 'info', type === 'delete' ? 'Deleting…' : 'Dismissing…');
+
+      try {
+        if (type === 'delete') {
+          await apiFetch(`/admin/customers/${encodeURIComponent(customerId)}`, {}, 'DELETE');
+        } else {
+          await apiFetch(`/admin/customers/${encodeURIComponent(customerId)}/deletion-request`, {}, 'DELETE');
+        }
+        closeModal();
+        loadRequests();
+      } catch (err) {
+        showStatus('modalStatus', 'error', `Failed: ${escHtml(err.message)}`);
+      }
+    }
+
+    loadRequests();
+  </script>
+</body>
+</html>

@@ -26,7 +26,7 @@ from geopy.geocoders import Nominatim
 from openai import AsyncOpenAI
 from pinecone import Pinecone
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent.prompts import INBOUND_SYSTEM_PROMPT, build_inbound_prompt
@@ -225,6 +225,43 @@ async def list_customers(
     return CustomerListResponse(total=total, customers=[_customer_to_record(c) for c in customers])
 
 
+class DeletionRequestItem(BaseModel):
+    customer_id: UUID
+    phone: str
+    name: str | None
+    email: str | None
+    requested_at: datetime
+
+
+class DeletionRequestsResponse(BaseModel):
+    total: int
+    items: list[DeletionRequestItem]
+
+
+@router.get("/customers/deletion-requests", response_model=DeletionRequestsResponse)
+async def list_deletion_requests(db: AsyncSession = Depends(get_db)):
+    """List all customers who have requested data deletion."""
+    result = await db.execute(
+        select(Customer)
+        .where(Customer.deletion_requested == True)  # noqa: E712
+        .order_by(Customer.deletion_requested_at.asc())
+    )
+    customers = list(result.scalars().all())
+    return DeletionRequestsResponse(
+        total=len(customers),
+        items=[
+            DeletionRequestItem(
+                customer_id=c.id,
+                phone=c.phone,
+                name=c.name,
+                email=c.email,
+                requested_at=c.deletion_requested_at,
+            )
+            for c in customers
+        ],
+    )
+
+
 @router.get("/customers/{customer_id}", response_model=CustomerRecord)
 async def get_customer(customer_id: UUID, db: AsyncSession = Depends(get_db)):
     """Retrieve a single customer by UUID."""
@@ -284,6 +321,18 @@ async def delete_customer(customer_id: UUID, db: AsyncSession = Depends(get_db))
     deleted = await customer_service.delete(db, customer_id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found.")
+
+
+@router.delete("/customers/{customer_id}/deletion-request", status_code=status.HTTP_204_NO_CONTENT)
+async def clear_deletion_request(customer_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Clear the deletion-requested flag after the admin has processed it."""
+    result = await db.execute(select(Customer).where(Customer.id == customer_id))
+    customer = result.scalar_one_or_none()
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    customer.deletion_requested = False
+    customer.deletion_requested_at = None
+    await db.commit()
 
 
 # ---------------------------------------------------------------------------

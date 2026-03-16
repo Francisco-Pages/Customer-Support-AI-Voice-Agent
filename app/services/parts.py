@@ -1,5 +1,5 @@
 """
-Parts service — look up part numbers by brand, part type/name, and product model.
+Parts service — look up part numbers by part type/name and product model.
 """
 
 from sqlalchemy import select, func
@@ -11,7 +11,6 @@ from app.db.models import Part, PartCompatibility
 async def lookup_parts(
     db: AsyncSession,
     product_model: str,
-    brand: str | None = None,
     part_type: str | None = None,
     part_name: str | None = None,
     similarity_threshold: float = 0.25,
@@ -23,11 +22,8 @@ async def lookup_parts(
     Matches product_model using pg_trgm similarity so minor variations
     (missing dashes, extra spaces) still resolve correctly.
 
-    At least one of brand, part_type, or part_name should be provided to
-    narrow results; product_model alone will search across all part types.
-
     Returns a list of dicts with keys: part_number, part_name, part_type,
-    brand, matched_model, similarity.
+    matched_model, similarity.
     """
     similarity_expr = func.similarity(PartCompatibility.product_model, product_model)
 
@@ -36,7 +32,6 @@ async def lookup_parts(
             Part.part_number,
             Part.part_name,
             Part.part_type,
-            Part.brand,
             Part.dp,
             Part.ndp,
             PartCompatibility.product_model.label("matched_model"),
@@ -48,8 +43,6 @@ async def lookup_parts(
         .limit(limit)
     )
 
-    if brand:
-        stmt = stmt.where(Part.brand.ilike(f"%{brand}%"))
     if part_type:
         stmt = stmt.where(Part.part_type.ilike(f"%{part_type}%"))
     if part_name:
@@ -63,7 +56,6 @@ async def lookup_parts(
             "part_number": r.part_number,
             "part_name": r.part_name,
             "part_type": r.part_type,
-            "brand": r.brand,
             "dp": float(r.dp) if r.dp is not None else None,
             "ndp": float(r.ndp) if r.ndp is not None else None,
             "matched_model": r.matched_model,
@@ -83,7 +75,6 @@ async def get_part_by_number(db: AsyncSession, part_number: str) -> dict | None:
         "part_number": part.part_number,
         "part_name": part.part_name,
         "part_type": part.part_type,
-        "brand": part.brand,
         "dp": float(part.dp) if part.dp is not None else None,
         "ndp": float(part.ndp) if part.ndp is not None else None,
     }

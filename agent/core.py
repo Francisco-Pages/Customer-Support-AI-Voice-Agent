@@ -187,7 +187,7 @@ class HVACAssistant(Agent):
                         self._customer_context = "\n".join(lines)
                         if customer.name:
                             first_name = customer.name.split()[0]
-                            greeting = f"Welcome back, {first_name}! How can I help you today?"
+                            greeting = f"Welcome back, {first_name}! Thank you for calling Comfortside customer support. How can I help you today?"
             except Exception:
                 logger.warning("Customer pre-load failed — continuing without context", exc_info=True)
 
@@ -544,7 +544,7 @@ class HVACAssistant(Agent):
             m = unique[0]
             return (
                 f"The replacement {m['part_type']} ({m['part_name']}) "
-                f"for {m['brand']} model '{product_model}' "
+                f"for model '{product_model}' "
                 f"has part number {m['part_number']}{_price_str(m)}."
             )
 
@@ -552,7 +552,7 @@ class HVACAssistant(Agent):
             f"Found {len(unique)} compatible parts for '{product_model}':"
         ]
         for m in unique:
-            lines.append(f"  • {m['part_number']} — {m['part_name']} ({m['part_type']}, {m['brand']}){_price_str(m)}")
+            lines.append(f"  • {m['part_number']} — {m['part_name']} ({m['part_type']}){_price_str(m)}")
         return "\n".join(lines)
 
     @function_tool
@@ -574,7 +574,7 @@ class HVACAssistant(Agent):
         price = _price_str(part)
         return (
             f"Part {part['part_number']}: {part['part_name']} "
-            f"({part['part_type']}, {part['brand']}){price}."
+            f"({part['part_type']}){price}."
         )
 
     # ------------------------------------------------------------------
@@ -898,6 +898,31 @@ class HVACAssistant(Agent):
         return f"SMS reply sent to {self._caller_phone}."
 
     # ------------------------------------------------------------------
+    # Function tools — data deletion request
+    # ------------------------------------------------------------------
+
+    @function_tool
+    async def request_data_deletion(self) -> str:
+        """
+        Flag the caller's record for deletion by the admin team.
+        Does not delete data immediately — marks it for review on the dashboard.
+        Use this when the caller explicitly asks to have their information removed.
+        """
+        if not self._caller_phone:
+            return "Cannot process deletion request — caller phone number not available for this session."
+        try:
+            async with AsyncSessionLocal() as db:
+                flagged = await customer_service.request_deletion(db, self._caller_phone)
+                await db.commit()
+        except Exception as exc:
+            logger.error("Deletion request failed | phone=%s error=%s", self._caller_phone, exc)
+            return "We were unable to submit your deletion request at this time. Please call back during business hours."
+
+        if not flagged:
+            return "No account was found for this phone number, so there is nothing to delete."
+        return "Your deletion request has been submitted. Our team will remove your information within 30 days."
+
+    # ------------------------------------------------------------------
     # Function tools — email documents
     # ------------------------------------------------------------------
 
@@ -1179,6 +1204,27 @@ async def hvac_agent(ctx: JobContext) -> None:
     caller_phone: str | None = _m.group(1) if _m else None
     logger.info("Caller phone | phone=%s room=%s", caller_phone, ctx.room.name)
 
+    # Load runtime settings from Redis (set via admin dashboard).
+    _prompt_override: str | None = None
+    _temperature: float = 0.1
+    _voice_id: str = "EXAVITQu4vr4xnSDxMaL"
+    if direction == "inbound":
+        try:
+            _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+            _prompt_override = await _redis.get("prompt:inbound")
+            _stored = await _redis.hgetall("agent:settings")
+            await _redis.aclose()
+            if _prompt_override:
+                logger.info("Using custom prompt from Redis (%d chars)", len(_prompt_override))
+            if _stored.get("temperature"):
+                _temperature = float(_stored["temperature"])
+                logger.info("LLM temperature from Redis: %s", _temperature)
+            if _stored.get("voice_id"):
+                _voice_id = _stored["voice_id"]
+                logger.info("TTS voice_id from Redis: %s", _voice_id)
+        except Exception as _exc:
+            logger.warning("Could not read settings from Redis: %s", _exc)
+
     # Build the voice pipeline session
     session = AgentSession(
         stt=openai.STT(model="gpt-4o-transcribe"),  # Auto language detection, strong Ukrainian support
@@ -1226,27 +1272,6 @@ async def hvac_agent(ctx: JobContext) -> None:
     # cancellation which is tuned for narrowband 8kHz phone audio.
     # For regular WebRTC participants (e.g. playground testing), use BVC.
     # ------------------------------------------------------------------
-
-    # Load runtime settings from Redis (set via admin dashboard).
-    _prompt_override: str | None = None
-    _temperature: float = 0.1
-    _voice_id: str = "EXAVITQu4vr4xnSDxMaL"
-    if direction == "inbound":
-        try:
-            _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
-            _prompt_override = await _redis.get("prompt:inbound")
-            _stored = await _redis.hgetall("agent:settings")
-            await _redis.aclose()
-            if _prompt_override:
-                logger.info("Using custom prompt from Redis (%d chars)", len(_prompt_override))
-            if _stored.get("temperature"):
-                _temperature = float(_stored["temperature"])
-                logger.info("LLM temperature from Redis: %s", _temperature)
-            if _stored.get("voice_id"):
-                _voice_id = _stored["voice_id"]
-                logger.info("TTS voice_id from Redis: %s", _voice_id)
-        except Exception as _exc:
-            logger.warning("Could not read settings from Redis: %s", _exc)
 
     agent = HVACAssistant(
         direction=direction,

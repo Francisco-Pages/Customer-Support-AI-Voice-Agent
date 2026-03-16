@@ -37,6 +37,7 @@ async function apiFetch(path, params = {}, method = 'GET', queryParams = {}) {
     try { const body = await res.json(); detail = body.detail || detail; } catch {}
     throw new Error(detail);
   }
+  if (res.status === 204 || res.headers.get('content-length') === '0') return null;
   return res.json();
 }
 
@@ -105,6 +106,7 @@ function renderNav(active) {
 
       <div class="sidebar-section">Customers</div>
       <a href="/dashboard/customers.html" class="sidebar-link ${active === 'customers' ? 'active' : ''}">Customers</a>
+      <a href="/dashboard/deletion-requests.html" class="sidebar-link ${active === 'deletion-requests' ? 'active' : ''}">Deletion Requests</a>
 
       <div class="sidebar-section">Agent</div>
       <a href="/dashboard/knowledge.html" class="sidebar-link ${active === 'knowledge' ? 'active' : ''}">Knowledge Base</a>

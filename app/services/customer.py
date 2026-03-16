@@ -3,6 +3,7 @@ Customer service — CRUD operations on the customers table.
 """
 
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -109,6 +110,18 @@ async def delete(db: AsyncSession, customer_id: uuid.UUID) -> bool:
     if not customer:
         return False
     await db.delete(customer)
+    await db.flush()
+    return True
+
+
+async def request_deletion(db: AsyncSession, phone: str) -> bool:
+    """Flag a customer record for deletion by their phone number.
+    Returns True if the flag was set, False if no record exists."""
+    customer = await get_by_phone(db, phone)
+    if not customer:
+        return False
+    customer.deletion_requested = True
+    customer.deletion_requested_at = datetime.now(timezone.utc)
     await db.flush()
     return True
 
