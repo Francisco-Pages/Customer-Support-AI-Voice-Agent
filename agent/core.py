@@ -822,6 +822,64 @@ class HVACAssistant(Agent):
         )
 
     @function_tool
+    async def end_call(
+        self,
+        farewell_message: Annotated[
+            str,
+            "The exact farewell sentence to speak before hanging up. "
+            "Keep it short and polite. Must be in the caller's language.",
+        ],
+    ) -> str:
+        """
+        End (hang up) the current call after speaking a farewell message.
+        Use when: the caller asks to end the call, the conversation has concluded
+        naturally, or the caller has been warned twice about inappropriate language
+        and continues using it.
+        Call this tool immediately — do not say anything before calling it.
+        The tool speaks the farewell and hangs up automatically.
+        """
+        logger.info("end_call requested | farewell=%r", farewell_message)
+
+        farewell_handle = self.session.say(farewell_message, allow_interruptions=False)
+
+        room_name = self._room_name
+        caller_phone = self._caller_phone
+
+        async def _hang_up() -> None:
+            try:
+                await asyncio.wait_for(asyncio.shield(farewell_handle._done_fut), timeout=15.0)
+            except asyncio.TimeoutError:
+                logger.warning("end_call farewell TTS timed out — hanging up anyway")
+
+            try:
+                async with lk_api.LiveKitAPI(
+                    url=settings.livekit_url,
+                    api_key=settings.livekit_api_key,
+                    api_secret=settings.livekit_api_secret,
+                ) as lk:
+                    await lk.room.remove_participant(
+                        lk_api.RoomParticipantIdentity(
+                            room=room_name,
+                            identity=f"sip_{caller_phone}",
+                        )
+                    )
+                logger.info(
+                    "SIP participant removed (call ended) | phone=%s room=%s",
+                    caller_phone,
+                    room_name,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to remove SIP participant on end_call | phone=%s error=%r",
+                    caller_phone,
+                    exc,
+                )
+
+        asyncio.ensure_future(_hang_up())
+
+        return "Call termination initiated. The farewell has already been spoken. Do not say anything further."
+
+    @function_tool
     async def schedule_callback(
         self,
         customer_phone: Annotated[str, "Customer phone number in E.164 format"],
@@ -1247,9 +1305,9 @@ async def hvac_agent(ctx: JobContext) -> None:
 
     # Build the voice pipeline session
     session = AgentSession(
-        stt=deepgram.STT(model="nova-2-general", language="multi"),  # Streaming STT — lower latency; "multi" enables multilingual without detect_language
+        stt=deepgram.STT(model="nova-2-general", language="multi"),  # Streaming STT — lower latency; "multi" enables multilingual; use gpt-4o-transcribe to improve language detection
         llm=openai.LLM(model="gpt-4o-mini", temperature=_temperature),       # Lower latency than gpt-4o
-        tts=elevenlabs.TTS(model="eleven_flash_v2_5", voice_id=_voice_id),  # Fast native multilingual TTS, 32 languages incl. Ukrainian
+        tts=elevenlabs.TTS(model="eleven_flash_v2_5", voice_id=_voice_id),  # Fast native multilingual TTS, 32 languages.
         vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
     )
