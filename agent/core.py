@@ -553,12 +553,19 @@ class HVACAssistant(Agent):
                 return f" | Price: ${m['ndp']:.2f}"
             return ""
 
+        _next_step = (
+            "\n\nMANDATORY NEXT STEP: Do NOT read the part information aloud yet. "
+            "First ask the caller: \"I found the part information. Would you prefer I text it to you, "
+            "or would you like me to read it out loud?\" Wait for their answer before doing anything else."
+        )
+
         if len(unique) == 1:
             m = unique[0]
             return (
                 f"The replacement {m['part_type']} ({m['part_name']}) "
                 f"for model '{product_model}' "
                 f"has part number {m['part_number']}{_price_str(m)}."
+                + _next_step
             )
 
         lines = [
@@ -566,6 +573,7 @@ class HVACAssistant(Agent):
         ]
         for m in unique:
             lines.append(f"  • {m['part_number']} — {m['part_name']} ({m['part_type']}){_price_str(m)}")
+        lines.append(_next_step)
         return "\n".join(lines)
 
     @function_tool
@@ -1104,7 +1112,8 @@ class HVACAssistant(Agent):
 
         additional = [f"{i}. {_fmt_entry(r)}" for i, r in enumerate(results[1:], 2)]
         if additional:
-            script += "\n\nADDITIONAL OPTIONS — present only one at a time if the caller asks:\n" + "\n".join(additional)
+            script += "\n\nADDITIONAL OPTIONS — read only one at a time, only if the caller asks for another:\n" + "\n".join(additional)
+        script += "\n\nMANDATORY: After reading the first result, stop and ask: \"Would you like another option?\" Do not read more results unless the caller asks."
         return script
 
     @function_tool
@@ -1145,7 +1154,8 @@ class HVACAssistant(Agent):
 
         additional = [f"{i}. {_fmt_entry(r)}" for i, r in enumerate(results[1:], 2)]
         if additional:
-            script += "\n\nADDITIONAL OPTIONS — present only one at a time if the caller asks:\n" + "\n".join(additional)
+            script += "\n\nADDITIONAL OPTIONS — read only one at a time, only if the caller asks for another:\n" + "\n".join(additional)
+        script += "\n\nMANDATORY: After reading the first result, stop and ask: \"Would you like another option?\" Do not read more results unless the caller asks."
         return script
 
     # ------------------------------------------------------------------
@@ -1306,8 +1316,8 @@ async def hvac_agent(ctx: JobContext) -> None:
     # Build the voice pipeline session
     session = AgentSession(
         stt=deepgram.STT(model="nova-2-general", language="multi"),  # Streaming STT — lower latency; "multi" enables multilingual; use gpt-4o-transcribe to improve language detection
-        llm=openai.LLM(model="gpt-4o-mini", temperature=_temperature),       # Lower latency than gpt-4o
-        tts=elevenlabs.TTS(model="eleven_flash_v2_5", voice_id=_voice_id),  # Fast native multilingual TTS, 32 languages.
+        llm=openai.LLM(model="gpt-4o-mini", temperature=_temperature),
+        tts=openai.TTS(model="tts-1", voice="alloy"),  # Low-latency TTS
         vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
     )
