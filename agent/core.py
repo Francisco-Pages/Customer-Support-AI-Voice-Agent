@@ -59,7 +59,7 @@ from app.services import geo as geo_service
 from app.services import parts as parts_service
 from app.services import warranty as warranty_service
 from app.email.gmail_client import send_documents_email as _send_documents_email
-from app.sms.linq_client import send_sms as _linq_send_sms
+from app.sms.clicksend_client import send_sms as _send_sms
 from app.documents.catalog import get_documents_sms_text
 
 logger = logging.getLogger(__name__)
@@ -115,7 +115,7 @@ class HVACAssistant(Agent):
         prompt_override: str | None = None,
     ) -> None:
         if direction == "inbound":
-            instructions = prompt_override or build_inbound_prompt(settings.linq_from_number)
+            instructions = prompt_override or build_inbound_prompt(settings.clicksend_from_number)
         else:
             instructions = OUTBOUND_SYSTEM_PROMPT
         super().__init__(instructions=instructions)
@@ -939,7 +939,7 @@ class HVACAssistant(Agent):
         Call this after every appointment is created or updated.
         """
         try:
-            await _linq_send_sms(to=customer_phone, message=message)
+            await _send_sms(to=customer_phone, message=message)
         except Exception as exc:
             logger.error("SMS send failed | to=%s error=%s", customer_phone, exc)
             return f"SMS could not be sent ({exc}). The appointment was still saved."
@@ -962,7 +962,7 @@ class HVACAssistant(Agent):
             return "Cannot send SMS reply — caller phone number not available for this session."
 
         try:
-            await _linq_send_sms(to=self._caller_phone, message=message)
+            await _send_sms(to=self._caller_phone, message=message)
         except Exception as exc:
             logger.error("SMS reply failed | to=%s error=%s", self._caller_phone, exc)
             return f"SMS reply could not be sent ({exc})."
@@ -1057,7 +1057,7 @@ class HVACAssistant(Agent):
             )
 
         try:
-            await _linq_send_sms(to=self._caller_phone, message=text)
+            await _send_sms(to=self._caller_phone, message=text)
         except Exception as exc:
             logger.error("Document SMS failed | to=%s error=%s", self._caller_phone, exc)
             return f"SMS could not be sent ({exc})."
@@ -1224,7 +1224,7 @@ class HVACAssistant(Agent):
 
                 if reply_text:
                     try:
-                        await asyncio.shield(_linq_send_sms(to=phone, message=reply_text[:1600]))
+                        await asyncio.shield(_send_sms(to=phone, message=reply_text[:1600]))
                         logger.info("SMS reply sent | to=%s", phone)
                     except Exception as exc:
                         logger.error("SMS reply failed | to=%s error=%r", phone, exc)

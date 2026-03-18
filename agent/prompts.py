@@ -413,11 +413,11 @@ Bravo r32 multi-zone outdoor: BRV-M18-230VO (up to 2 zones, 18K-24K BTU) | BRV-M
 
 
 def build_inbound_prompt(sms_number: str) -> str:
-    """Return the inbound system prompt with the Linq SMS number injected."""
+    """Return the inbound system prompt with the SMS number injected."""
     return _INBOUND_SYSTEM_PROMPT_TEMPLATE.format(sms_number=sms_number)
 
 
-# Fallback constant — sms_number placeholder left as-is if Linq isn't configured.
+# Fallback constant — sms_number placeholder left as-is if ClickSend isn't configured.
 INBOUND_SYSTEM_PROMPT = _INBOUND_SYSTEM_PROMPT_TEMPLATE
 
 

@@ -7,7 +7,7 @@ from fastapi.responses import RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.routers import admin, linq, stream, telephony
+from app.routers import admin, clicksend, stream, telephony
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -51,7 +51,7 @@ def create_app() -> FastAPI:
     app.include_router(telephony.router)
     app.include_router(stream.router)
     app.include_router(admin.router)
-    app.include_router(linq.router)
+    app.include_router(clicksend.router)
 
     # ------------------------------------------------------------------
     # Health check

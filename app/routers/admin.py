@@ -1459,7 +1459,7 @@ async def _execute_tool(name: str, args: dict, db: AsyncSession) -> str:
                 seen.add(m["part_number"])
                 lines.append(
                     f"Part number: {m['part_number']} — {m['part_name']} "
-                    f"({m['part_type']}, {m['brand']}) matched model: {m['matched_model']}"
+                    f"({m['part_type']}) matched model: {m['matched_model']}"
                     f"{_fmt_price(m)}"
                 )
         return "\n".join(lines)
@@ -1639,7 +1639,7 @@ async def get_prompt(redis: aioredis.Redis = Depends(get_redis)):
     if stored:
         return PromptResponse(prompt=stored, is_custom=True)
     return PromptResponse(
-        prompt=build_inbound_prompt(settings.linq_from_number),
+        prompt=build_inbound_prompt(settings.clicksend_from_number),
         is_custom=False,
     )
 

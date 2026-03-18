@@ -58,10 +58,11 @@ class Settings(BaseSettings):
     gmail_sender: str = ""       # e.g. support@yourdomain.com
     gmail_app_password: str = "" # Gmail App Password (not your account password)
 
-    # Linq (SMS)
-    linq_api_token: str = ""          # Bearer token from Linq dashboard
-    linq_from_number: str = ""        # E.164 number provisioned on Linq
-    linq_webhook_secret: str = ""     # Signing secret from webhook subscription
+    # ClickSend (SMS)
+    clicksend_username: str = ""         # ClickSend account username (email)
+    clicksend_api_key: str = ""          # ClickSend API key
+    clicksend_from_number: str = ""      # E.164 or alphanumeric sender ID
+    clicksend_webhook_secret: str = ""   # Optional secret appended to webhook URL
 
 
 settings = Settings()
