@@ -112,7 +112,7 @@ _SKIP_RAG_PATTERN = re.compile(
     r"|"
     # Name / city / state giving — pure info collection, no KB needed
     r"\bmy\s+name\s+is\b"
-    r"|\bi('?m| am)\s+(?:calling\s+from\s+)?[A-Z][a-z]"
+    r"|\bi('?m| am)\s+(?:calling\s+from|in)\s+[A-Za-z]"
     r"|\bI'?m\s+in\s+[A-Z]"
     r"|\bI\s+live\s+in\b"
     r"|\bI('?m| am)\s+from\b",
