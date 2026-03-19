@@ -308,23 +308,23 @@ class HVACAssistant(Agent):
     # TTS pipeline node — sanitize LLM output before synthesis
     # ------------------------------------------------------------------
 
-    async def tts_node(
-        self,
-        text: AsyncIterable[str],
-        model_settings,
-    ) -> AsyncGenerator[rtc.AudioFrame, None]:
-        """Strip markdown characters the LLM may emit before sending to TTS."""
-
-        async def _clean(source: AsyncIterable[str]) -> AsyncGenerator[str, None]:
-            async for chunk in source:
-                # Remove bold/italic markers and backticks; strip leading '#' headers
-                chunk = re.sub(r"[*`]", "", chunk)
-                chunk = re.sub(r"(?m)^#+\s*", "", chunk)
-                if chunk:
-                    yield chunk
-
-        async for frame in Agent.default.tts_node(self, _clean(text), model_settings):
-            yield frame
+    # async def tts_node(
+    #     self,
+    #     text: AsyncIterable[str],
+    #     model_settings,
+    # ) -> AsyncGenerator[rtc.AudioFrame, None]:
+    #     """Strip markdown characters the LLM may emit before sending to TTS."""
+    #
+    #     async def _clean(source: AsyncIterable[str]) -> AsyncGenerator[str, None]:
+    #         async for chunk in source:
+    #             # Remove bold/italic markers and backticks; strip leading '#' headers
+    #             chunk = re.sub(r"[*`]", "", chunk)
+    #             chunk = re.sub(r"(?m)^#+\s*", "", chunk)
+    #             if chunk:
+    #                 yield chunk
+    #
+    #     async for frame in Agent.default.tts_node(self, _clean(text), model_settings):
+    #         yield frame
 
     async def on_user_turn_completed(
         self, turn_ctx: ChatContext, new_message: ChatMessage
@@ -1158,6 +1158,23 @@ class HVACAssistant(Agent):
         script += "\n\nMANDATORY: After reading the first result, stop and ask: \"Would you like another option?\" Do not read more results unless the caller asks."
         return script
 
+    @function_tool
+    async def switch_language(
+        self,
+        language: Annotated[
+            str,
+            "BCP-47 language code to switch speech recognition to, e.g. 'es' for Spanish, "
+            "'fr' for French, 'pt' for Portuguese, 'en' for English",
+        ],
+    ) -> str:
+        """
+        Switch the speech recognition (STT) language when the caller wants to speak
+        in a different language. Call this as soon as the caller asks to switch languages.
+        """
+        self.session.stt.update_options(language=language)
+        logger.info("STT language switched to: %s", language)
+        return f"Speech recognition switched to language: {language}. Please continue."
+
     # ------------------------------------------------------------------
     # SMS side-channel watcher (private)
     # ------------------------------------------------------------------
@@ -1315,11 +1332,11 @@ async def hvac_agent(ctx: JobContext) -> None:
 
     # Build the voice pipeline session
     session = AgentSession(
-        stt=deepgram.STT(model="nova-2-general", language="multi"),  # Streaming STT — lower latency; "multi" enables multilingual; use gpt-4o-transcribe to improve language detection
+        stt=deepgram.STT(model="nova-2-general", language="en"),
         llm=openai.LLM(model="gpt-4o-mini", temperature=_temperature),
-        tts=openai.TTS(model="tts-1", voice="alloy"),  # Low-latency TTS
+        tts=elevenlabs.TTS(model="eleven_flash_v2_5", voice_id=_voice_id),  # Fast native multilingual TTS, 32 languages incl. Ukrainian
         vad=silero.VAD.load(),
-        turn_detection=MultilingualModel(),
+        # turn_detection=MultilingualModel(),
     )
 
     # ------------------------------------------------------------------
