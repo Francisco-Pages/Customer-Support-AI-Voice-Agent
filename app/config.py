@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     # Application
     app_host: str = "0.0.0.0"
     app_port: int = 8000
-    app_base_url: str = "https://your-domain.com"  # Public URL Twilio posts webhooks to
+    app_base_url: str  # Public URL Twilio posts webhooks to, e.g. https://your-domain.com
     debug: bool = False
 
     # Twilio

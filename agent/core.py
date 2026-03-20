@@ -50,7 +50,7 @@ from twilio.rest import Client as TwilioClient
 from agent.prompts import build_inbound_prompt, OUTBOUND_SYSTEM_PROMPT
 from app.config import settings
 from app.db.models import CustomerProduct
-from app.dependencies import AsyncSessionLocal
+from app.dependencies import AsyncSessionLocal, get_redis
 from app.rag.retriever import retrieve, _index as _rag_index, _oai as _rag_oai
 from app.services import appointment as appointment_service
 from app.services import call as call_service
@@ -144,12 +144,11 @@ class HVACAssistant(Agent):
         # new subscription that would receive every subsequent SMS.
         if self._caller_phone and not (self._sms_task and not self._sms_task.done()):
             try:
-                redis = await aioredis.from_url(settings.redis_url, decode_responses=True)
+                redis = await get_redis()
                 await redis.set(f"active_call:{self._caller_phone}", "1", ex=7200)
                 # Retrieve the Twilio Call SID stored by the /inbound webhook so
                 # we can link the post-call transcript back to the DB record.
                 self._twilio_call_sid = await redis.get(f"call_sid:{self._caller_phone}")
-                await redis.aclose()
                 self._sms_task = asyncio.create_task(
                     self._watch_sms(self._caller_phone)
                 )
@@ -204,9 +203,8 @@ class HVACAssistant(Agent):
 
         if self._caller_phone:
             try:
-                redis = await aioredis.from_url(settings.redis_url, decode_responses=True)
+                redis = await get_redis()
                 await redis.delete(f"active_call:{self._caller_phone}")
-                await redis.aclose()
             except Exception:
                 logger.warning("Could not remove active_call key from Redis", exc_info=True)
 
@@ -772,13 +770,12 @@ class HVACAssistant(Agent):
         # the <Dial> action URL (/telephony/status). That endpoint reads this key
         # and returns TwiML that bridges the caller to the human agent line.
         try:
-            redis = await aioredis.from_url(settings.redis_url, decode_responses=True)
+            redis = await get_redis()
             await redis.set(
                 f"transfer:{call_sid}",
                 json.dumps({"to": settings.transfer_phone_number, "from": caller_phone}),
                 ex=300,
             )
-            await redis.aclose()
         except Exception:
             logger.warning(
                 "Could not write transfer key to Redis | call_sid=%s", call_sid
@@ -1315,10 +1312,9 @@ async def hvac_agent(ctx: JobContext) -> None:
     _voice_id: str = "EXAVITQu4vr4xnSDxMaL"
     if direction == "inbound":
         try:
-            _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+            _redis = await get_redis()
             _prompt_override = await _redis.get("prompt:inbound")
             _stored = await _redis.hgetall("agent:settings")
-            await _redis.aclose()
             if _prompt_override:
                 logger.info("Using custom prompt from Redis (%d chars)", len(_prompt_override))
             if _stored.get("temperature"):
