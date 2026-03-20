@@ -128,10 +128,12 @@ class HVACAssistant(Agent):
         self._twilio_call_sid: str | None = None
         self._sms_task: asyncio.Task | None = None
         self._session_ref: AgentSession | None = None  # Set by hvac_agent() after start
-        self._customer_context: str | None = None  # Pre-loaded on on_enter for first-turn injection
-        self._customer_context_injected: bool = False
-        self._user_end_timestamps: list[datetime] = []    # VAD end-of-speech, one per user turn
-        self._agent_start_timestamps: list[datetime] = [] # TTS audio start, one per agent turn
+        self._customer_context: str | None = None  # Pre-loaded on on_enter; injected into session history
+        self._pending_user_ts: datetime | None = None       # Latest VAD end; committed on turn completion
+        self._capture_next_agent_ts: bool = True            # True → capture next agent_started_speaking
+        self._user_end_timestamps: list[datetime] = []     # One per user turn, in history order
+        self._agent_start_timestamps: list[datetime] = []  # One per agent turn, in history order
+        self._call_ending: bool = False                     # Set when end_call is initiated
 
     # ------------------------------------------------------------------
     # Session lifecycle hooks
@@ -186,6 +188,9 @@ class HVACAssistant(Agent):
                             ]
                             lines.append("Recent call history:\n" + "\n".join(call_lines))
                         self._customer_context = "\n".join(lines)
+                        self.session.history.add_message(
+                            role="system", content=self._customer_context
+                        )
                         if customer.name:
                             first_name = customer.name.split()[0]
                             greeting = f"Welcome back, {first_name}! Thank you for calling Comfortside customer support. How can I help you today?"
@@ -340,11 +345,17 @@ class HVACAssistant(Agent):
         Injected messages are scoped to this turn only and are not persisted
         to the chat history, keeping the context window lean.
         """
-        # Inject pre-loaded customer context on the first turn so the LLM
-        # knows who is calling without needing to call lookup_customer.
-        if not self._customer_context_injected and self._customer_context:
-            turn_ctx.add_message(role="system", content=self._customer_context)
-            self._customer_context_injected = True
+        if self._call_ending:
+            return
+
+        # Commit the VAD end-of-speech timestamp for this user turn (the pending
+        # value is the last VAD fire before turn completion, i.e. true speech end).
+        self._user_end_timestamps.append(
+            self._pending_user_ts or datetime.now(timezone.utc)
+        )
+        self._pending_user_ts = None
+        # Arm the agent timestamp capture for the response that follows.
+        self._capture_next_agent_ts = True
 
         query = new_message.text_content
         if not query:
@@ -844,6 +855,7 @@ class HVACAssistant(Agent):
         The tool speaks the farewell and hangs up automatically.
         """
         logger.info("end_call requested | farewell=%r", farewell_message)
+        self._call_ending = True
 
         farewell_handle = self.session.say(farewell_message, allow_interruptions=False)
 
@@ -1342,14 +1354,22 @@ async def hvac_agent(ctx: JobContext) -> None:
 
     @session.on("user_stopped_speaking")
     def on_user_stopped_speaking() -> None:
-        agent._user_end_timestamps.append(datetime.now(timezone.utc))
+        # Overwrite on every VAD fire — on_user_turn_completed commits the final value.
+        agent._pending_user_ts = datetime.now(timezone.utc)
 
     @session.on("agent_started_speaking")
     def on_agent_started_speaking() -> None:
-        agent._agent_start_timestamps.append(datetime.now(timezone.utc))
+        # Capture exactly once per turn (greeting + each LLM response).
+        # _capture_next_agent_ts is set True in __init__ (for greeting) and
+        # again in on_user_turn_completed (for each subsequent response).
+        if agent._capture_next_agent_ts:
+            agent._agent_start_timestamps.append(datetime.now(timezone.utc))
+            agent._capture_next_agent_ts = False
 
     @session.on("user_input_transcribed")
     def on_transcript(ev) -> None:
+        if agent._call_ending:
+            return
         transcript = getattr(ev, "transcript", "") or ""
         if transcript and _is_safety_emergency(transcript):
             logger.warning(
