@@ -1199,8 +1199,6 @@ class HVACAssistant(Agent):
                 sms_body: str = message["data"]
                 logger.info("SMS received during call | from=%s body=%r", phone, sms_body)
 
-                # RAG — same pattern as on_user_turn_completed but triggered
-                # manually because generate_reply() bypasses that hook entirely.
                 chat_ctx = self.session.history.copy()
                 try:
                     rag_context = await retrieve(query=sms_body)
@@ -1330,8 +1328,9 @@ async def hvac_agent(ctx: JobContext) -> None:
     session = AgentSession(
         stt=deepgram.STT(model="nova-2-general", language="en"),
         llm=openai.LLM(model="gpt-4o-mini", temperature=_temperature),
+        # tts=openai.TTS(model="tts-1", voice="alloy"),  # Low-latency TTS
         tts=elevenlabs.TTS(model="eleven_flash_v2_5", voice_id=_voice_id),  # Fast native multilingual TTS, 32 languages incl. Ukrainian
-        vad=silero.VAD.load(),
+        vad=silero.VAD.load(min_silence_duration=0.2, prefix_padding_duration=0.3),
         # turn_detection=MultilingualModel(),
     )
 
